@@ -31,7 +31,7 @@ omarchy plugin remove drace3000.bottom-dock
 ## Quick start
 
 1. Move the pointer to the screen edge where the dock sits (bottom by default) to reveal it.
-2. When empty, the dock shows **Hello World**.
+2. When empty, the dock shows **Right click to start customization**.
 3. **Right-click** empty dock space to open the menu.
 4. Use **ADD** and **SETTINGS** to customize.
 
@@ -39,7 +39,7 @@ omarchy plugin remove drace3000.bottom-dock
 
 ### Auto-hide
 
-The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Drag the bar itself toward the left or right edge of the screen to park it there, or back to the bottom. A tip shows Left edge, Right edge, or Bottom while you drag.
+The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Hold Super and drag the bar toward the left or right edge to park it there. Drag it inward or downward to put it back on the bottom. A tip shows Left edge, Right edge, or Bottom while you drag.
 
 ### Left / Center / Right slots
 
@@ -109,7 +109,7 @@ Also:
 
 ### Empty dock
 
-If a workspace has no icons, the dock shows **Hello World** until you add something.
+If a workspace has no icons, the dock shows **Right click to start customization** until you add something.
 
 ## Keyboard shortcuts
 

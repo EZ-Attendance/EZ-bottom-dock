@@ -10,7 +10,7 @@ import qs.Ui
 import "DockModel.js" as DockModel
 
 // Auto-hiding bottom dock with left / center / right app icons.
-// Empty layout shows "Hello World". Right-click to add apps or web links.
+// Empty layout shows "Right click to start customization". Right-click to add apps or web links.
 // Right-click an icon, then the info button, for help on what the dock does.
 // Layouts are stored per Hyprland workspace. Each monitor's dock shows the
 // workspace that monitor is displaying, even when the cursor is on another output.
@@ -1990,7 +1990,7 @@ Item {
         visible: dockWindow.layoutEmpty
         anchors.centerIn: parent
         textFormat: Text.PlainText
-        text: "Hello World"
+        text: "Right click to start customization"
         color: root.ink
         font.family: Style.font.family
         font.pixelSize: Style.font.body
