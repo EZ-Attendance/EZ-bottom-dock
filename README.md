@@ -1,6 +1,6 @@
 # EZ Bottom Dock
 
-Easy auto-hiding bottom dock for apps, plugins, and web links — with per-workspace layouts.
+Easy auto-hiding dock for apps, plugins, web links, and keybinds — with per-workspace layouts.
 
 Built for [Omarchy](https://omarchy.org) / Quickshell. Plugin id: `drace3000.bottom-dock`.
 
@@ -30,7 +30,7 @@ omarchy plugin remove drace3000.bottom-dock
 
 ## Quick start
 
-1. Move the pointer to the bottom edge of the screen to reveal the dock.
+1. Move the pointer to the screen edge where the dock sits (bottom by default) to reveal it.
 2. When empty, the dock shows **Hello World**.
 3. **Right-click** empty dock space to open the menu.
 4. Use **ADD** and **SETTINGS** to customize.
@@ -39,7 +39,7 @@ omarchy plugin remove drace3000.bottom-dock
 
 ### Auto-hide
 
-The dock stays hidden until you move the cursor to the bottom of the screen. It stays open while you hover it, use menus, or drag icons.
+The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Drag the bar itself toward the left or right edge of the screen to park it there, or back to the bottom. A tip shows Left edge, Right edge, or Bottom while you drag.
 
 ### Left / Center / Right slots
 
@@ -55,6 +55,7 @@ Right-click the dock background:
    - **App** — search and pick a desktop app
    - **Plugin** — pick a summonable Omarchy shell plugin (panels, menus, overlays, and many bar widgets)
    - **Web** — enter a name and URL
+   - **Keybind** — pick an Omarchy shortcut. It appears as a short letter badge. Left-click runs that shortcut.
 
 ### Per-icon actions
 
@@ -69,7 +70,7 @@ Right-click the dock background:
 
 ### Running and focused indicators
 
-App icons show a small indicator when that app is running. A stronger indicator marks the focused window. Clicking a running app focuses it; clicking again (or when not running) launches it.
+App icons and keybind badges show a blinking underline while that window is open on the workspace this dock is showing. The underline is wider when that window is focused. Closing the window clears the underline. A keybind that does not open a window stays unmarked. Clicking an app launches it on this workspace. Clicking a keybind runs its shortcut.
 
 ### Icon popups (tooltips)
 

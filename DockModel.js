@@ -5,26 +5,34 @@ function emptyLayout() {
   return { left: [], center: [], right: [] }
 }
 
+function cloneItem(item) {
+  if (!item || typeof item !== "object") return null
+  var kind = String(item.kind || (item.pluginId ? "plugin" : (item.url ? "web" : (item.bindDispatcher ? "keybind" : "app"))))
+  if (kind === "separator") return null
+  return {
+    id: String(item.id || ""),
+    label: String(item.label || item.id || ""),
+    icon: String(item.icon || ""),
+    desktopId: String(item.desktopId || ""),
+    pluginId: String(item.pluginId || ""),
+    url: String(item.url || ""),
+    exec: String(item.exec || ""),
+    badge: String(item.badge || ""),
+    bindCombo: String(item.bindCombo || ""),
+    bindDispatcher: String(item.bindDispatcher || ""),
+    bindArg: String(item.bindArg || ""),
+    kind: kind
+  }
+}
+
 function cloneLayout(layout) {
   var src = layout && typeof layout === "object" ? layout : {}
   function cloneSection(name) {
     var arr = Array.isArray(src[name]) ? src[name] : []
     var out = []
     for (var i = 0; i < arr.length; i++) {
-      var e = arr[i]
-      if (!e || typeof e !== "object") continue
-      var kind = String(e.kind || (e.pluginId ? "plugin" : (e.url ? "web" : "app")))
-      if (kind === "separator") continue
-      out.push({
-        id: String(e.id || ""),
-        label: String(e.label || e.id || ""),
-        icon: String(e.icon || ""),
-        desktopId: String(e.desktopId || ""),
-        pluginId: String(e.pluginId || ""),
-        url: String(e.url || ""),
-        exec: String(e.exec || ""),
-        kind: kind
-      })
+      var e = cloneItem(arr[i])
+      if (e) out.push(e)
     }
     return out
   }
@@ -98,19 +106,9 @@ function firstNonEmptyLayout(map, preferred) {
 }
 
 function pruneEmptyWorkspaceLayouts(map, fallbackLayout) {
-  var src = map && typeof map === "object" ? map : {}
-  var out = {}
-  var fallbackEmpty = !fallbackLayout || isEmpty(fallbackLayout)
-  for (var key in src) {
-    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
-    var lay = src[key]
-    // Drop auto-created empty workspaces; keep real custom layouts (including
-    // intentionally emptied ones only if they differ from an empty default).
-    if (isEmpty(lay) && !fallbackEmpty)
-      continue
-    out[String(key)] = cloneLayout(lay)
-  }
-  return out
+  // Keep explicit layouts, including empty ones, so a workspace can hide
+  // icons that still live on the shared default.
+  return cloneWorkspaceMap(map)
 }
 
 function sectionCount(layout, name) {
@@ -136,7 +134,10 @@ function parseDockConfig(rawText, pluginId) {
     workspaces: {},
     iconSize: 0,
     bgOpacity: -1,
+    bgColorKey: "",
+    bgColorHex: "",
     showTips: true,
+    barEdge: "bottom",
     hasWorkspaceMap: false,
     hasDefaultLayout: false
   }
@@ -150,8 +151,14 @@ function parseDockConfig(rawText, pluginId) {
         cfg.iconSize = Number(entry.iconSize || 0)
         if (entry.bgOpacity !== undefined && entry.bgOpacity !== null)
           cfg.bgOpacity = Number(entry.bgOpacity)
+        if (entry.bgColorKey !== undefined && entry.bgColorKey !== null)
+          cfg.bgColorKey = String(entry.bgColorKey || "")
+        if (entry.bgColorHex !== undefined && entry.bgColorHex !== null)
+          cfg.bgColorHex = String(entry.bgColorHex || "")
         if (entry.showTips !== undefined && entry.showTips !== null)
           cfg.showTips = entry.showTips !== false && entry.showTips !== 0 && entry.showTips !== "false"
+        if (entry.barEdge === "left" || entry.barEdge === "right" || entry.barEdge === "bottom")
+          cfg.barEdge = entry.barEdge
         if (entry.defaultLayout && typeof entry.defaultLayout === "object") {
           cfg.defaultLayout = cloneLayout(entry.defaultLayout)
           cfg.hasDefaultLayout = !isEmpty(cfg.defaultLayout)
@@ -181,6 +188,57 @@ function clampBgOpacity(n) {
   if (v < 0) return 0
   if (v > 100) return 100
   return v
+}
+
+function parseThemeColors(raw) {
+  var out = []
+  var seen = {}
+  var lines = String(raw || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(/^\s*([A-Za-z0-9_]+)\s*=\s*["']?(#[0-9A-Fa-f]{6})/)
+    if (!match) continue
+    var key = match[1]
+    var hex = String(match[2] || "").toUpperCase()
+    if (!hex.length || seen[hex]) continue
+    seen[hex] = true
+    out.push({ key: key, hex: hex })
+  }
+  return out
+}
+
+function parseWallpaperColors(raw) {
+  var out = []
+  var seen = {}
+  try {
+    var data = JSON.parse(String(raw || "[]"))
+    if (!Array.isArray(data)) return out
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i]
+      if (!row) continue
+      var hex = String(row.hex || "").toUpperCase()
+      if (!hex.length || hex.charAt(0) !== "#" || seen[hex]) continue
+      seen[hex] = true
+      out.push({
+        key: String(row.key || ("wall-" + out.length)),
+        hex: hex
+      })
+    }
+  } catch (e) {
+  }
+  return out
+}
+
+function resolveThemeColor(palette, key, fallbackHex) {
+  var want = String(key || "")
+  var list = Array.isArray(palette) ? palette : []
+  if (want.length) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].key) === want && list[i].hex)
+        return String(list[i].hex)
+    }
+  }
+  var fallback = String(fallbackHex || "")
+  return fallback.charAt(0) === "#" ? fallback : ""
 }
 
 function defaultBgOpacity() {
@@ -250,6 +308,85 @@ function sortedDesktopEntries(values, query) {
   })
   var out = []
   for (var j = 0; j < scored.length; j++) out.push(scored[j].entry)
+  return out
+}
+
+function keybindWords(description) {
+  var cleaned = String(description || "").replace(/[^A-Za-z0-9]+/g, " ").trim()
+  if (!cleaned.length) return []
+  return cleaned.split(/\s+/)
+}
+
+function collectBadges(layout) {
+  var used = {}
+  var names = ["left", "center", "right"]
+  var src = layout && typeof layout === "object" ? layout : {}
+  for (var s = 0; s < names.length; s++) {
+    var arr = Array.isArray(src[names[s]]) ? src[names[s]] : []
+    for (var i = 0; i < arr.length; i++) {
+      var item = arr[i]
+      if (!item || String(item.kind || "") !== "keybind") continue
+      var badge = String(item.badge || "").toUpperCase()
+      if (badge) used[badge] = true
+    }
+  }
+  return used
+}
+
+function keybindBadge(description, used) {
+  var words = keybindWords(description)
+  var base = "KEY"
+  if (words.length >= 2) {
+    base = ""
+    for (var i = 0; i < words.length && base.length < 3; i++)
+      base += words[i].charAt(0)
+  } else if (words.length === 1) {
+    base = words[0].slice(0, 3)
+  }
+  base = base.toUpperCase()
+  if (!base.length) base = "KEY"
+  var taken = used || {}
+  var badge = base.slice(0, 3)
+  var n = 2
+  while (taken[badge]) {
+    badge = (base.slice(0, 2) + String(n)).slice(0, 3)
+    n++
+    if (n > 99) break
+  }
+  taken[badge] = true
+  return badge
+}
+
+function makeKeybindItem(row, layout) {
+  var name = String((row && row.name) || "").trim() || "Keybinding"
+  var badge = keybindBadge(name, collectBadges(layout))
+  var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "key"
+  return {
+    id: "keybind-" + slug + "-" + Date.now().toString(36),
+    label: name,
+    icon: "",
+    badge: badge,
+    desktopId: "",
+    pluginId: "",
+    url: "",
+    exec: "",
+    bindCombo: String((row && row.combo) || ""),
+    bindDispatcher: String((row && row.dispatcher) || ""),
+    bindArg: String((row && row.arg) || ""),
+    kind: "keybind"
+  }
+}
+
+function filterKeybinds(list, query) {
+  var q = String(query || "").trim().toLowerCase()
+  var rows = list || []
+  if (!q) return rows.slice()
+  var out = []
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    var hay = [row.name, row.combo, row.line].join(" ").toLowerCase()
+    if (hay.indexOf(q) >= 0) out.push(row)
+  }
   return out
 }
 
@@ -402,9 +539,46 @@ function makeAppItem(entry) {
 
 function itemLabel(item) {
   if (!item) return ""
+  var label = String(item.label || "").trim()
+  if (label.length)
+    return label
   if (String(item.pluginId || "") === "omarchy.menu" || String(item.id || "") === "plugin-omarchy.menu")
     return "Oma menu"
-  return String(item.label || item.id || "")
+  return String(item.id || "")
+}
+
+function setItemBadge(layout, itemId, badge) {
+  var next = cloneLayout(layout)
+  var want = String(itemId || "")
+  var mark = String(badge || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 3)
+  if (!want.length || !mark.length)
+    return next
+  var sections = ["left", "center", "right"]
+  for (var i = 0; i < sections.length; i++) {
+    var key = sections[i]
+    for (var j = 0; j < next[key].length; j++) {
+      if (next[key][j] && next[key][j].id === want)
+        next[key][j].badge = mark
+    }
+  }
+  return next
+}
+
+function renameItem(layout, itemId, label) {
+  var next = cloneLayout(layout)
+  var want = String(itemId || "")
+  var name = String(label || "").trim()
+  if (!want.length || !name.length)
+    return next
+  var sections = ["left", "center", "right"]
+  for (var i = 0; i < sections.length; i++) {
+    var key = sections[i]
+    for (var j = 0; j < next[key].length; j++) {
+      if (next[key][j] && next[key][j].id === want)
+        next[key][j].label = name
+    }
+  }
+  return next
 }
 
 function stripId(layout, itemId) {
@@ -516,10 +690,56 @@ function idsMatch(a, b) {
 }
 
 // Candidates used to match a dock item against Wayland toplevel appId values.
+function keybindWindowKeys(item) {
+  var keys = []
+  function add(v) {
+    var n = normalizeAppId(v)
+    if (!n) return
+    if (keys.indexOf(n) < 0) keys.push(n)
+  }
+  if (!item || String(item.kind || "") !== "keybind") return keys
+  if (String(item.bindDispatcher || "") !== "exec") return keys
+  var arg = String(item.bindArg || "").trim()
+  if (!arg.length) return keys
+  var url = webAppUrlFromExec(arg)
+  if (url) {
+    var ids = chromeWebAppIds(url)
+    for (var i = 0; i < ids.length; i++) add(ids[i])
+    return keys
+  }
+  var token = arg.split(/\s+/)[0].split("/").pop()
+  if (token === "omarchy-launch-nautilus" || token === "nautilus") {
+    add("org.gnome.Nautilus")
+    add("nautilus")
+    return keys
+  }
+  if (token === "omarchy-agent") {
+    add("org.omarchy.agent")
+    return keys
+  }
+  var gtk = arg.match(/gtk-launch\s+(\S+)/)
+  if (gtk && gtk[1]) add(String(gtk[1]).replace(/\.desktop$/i, ""))
+  if (token && token !== "sh" && token !== "bash") add(token)
+  return keys
+}
+
+// Full class equality. Substring matching treated a short token such as
+// "agent" as still running after that window had closed.
+function keybindMatchesClass(item, className) {
+  var appId = normalizeAppId(className)
+  if (!appId) return false
+  var keys = keybindWindowKeys(item)
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i] === appId) return true
+  }
+  return false
+}
+
 function itemMatchKeys(item) {
   if (!item) return []
   var kind = String(item.kind || "")
   if (kind === "plugin" || kind === "web") return []
+  if (kind === "keybind") return keybindWindowKeys(item)
   var keys = []
   function add(v) {
     var n = normalizeAppId(v)
@@ -538,6 +758,46 @@ function itemMatchesToplevel(item, toplevel) {
   var appId = normalizeAppId(toplevel.appId)
   if (!appId) return false
   var keys = itemMatchKeys(item)
+  for (var i = 0; i < keys.length; i++) {
+    if (idsMatch(keys[i], appId)) return true
+  }
+  return false
+}
+
+// omarchy-launch-webapp runs Chrome with --app=URL. Chrome's Wayland id is
+// chrome-<host>__<path>-<profile>, not the .desktop file name.
+function webAppUrlFromExec(exec) {
+  var text = String(exec || "")
+  var quoted = text.match(/omarchy-launch-webapp\s+"([^"]+)"/i)
+  if (quoted && quoted[1]) return quoted[1]
+  var plain = text.match(/omarchy-launch-webapp\s+(\S+)/i)
+  if (plain && plain[1]) return plain[1]
+  var app = text.match(/--app=(?:"([^"]+)"|(\S+))/i)
+  if (app) return app[1] || app[2] || ""
+  return ""
+}
+
+function chromeWebAppIds(url) {
+  var raw = String(url || "").trim()
+  var match = raw.match(/^[a-z][a-z0-9+.-]*:\/\/([^\/?#]+)([^?#]*)/i)
+  if (!match) return []
+  var host = String(match[1] || "").toLowerCase()
+  var path = String(match[2] || "/")
+  if (!path.length) path = "/"
+  if (path.charAt(0) !== "/") path = "/" + path
+  var name = (host + "_" + path).replace(/\//g, "_").replace(/^_+|_+$/g, "")
+  if (!name.length) return []
+  return [name, "chrome-" + name + "-default", "chromium-" + name + "-default"]
+}
+
+function itemMatchesToplevelKeys(item, toplevel, extraKeys) {
+  if (item && String(item.kind || "") === "keybind")
+    return keybindMatchesClass(item, toplevel && toplevel.appId)
+  if (itemMatchesToplevel(item, toplevel)) return true
+  if (!toplevel) return false
+  var appId = normalizeAppId(toplevel.appId)
+  if (!appId) return false
+  var keys = extraKeys || []
   for (var i = 0; i < keys.length; i++) {
     if (idsMatch(keys[i], appId)) return true
   }
