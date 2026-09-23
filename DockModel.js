@@ -327,6 +327,22 @@ function resizeSection(layout, index, delta, minSpan) {
   return next
 }
 
+function applySpanDeltas(layout, before, after, iconSlot, keybindSlot, gap) {
+  var next = cloneLayout(layout)
+  var prior = sectionsOf(before)
+  var later = sectionsOf(after)
+  var n = Math.min(prior.length, later.length, next.sections.length)
+  for (var i = 0; i < n; i++) {
+    var delta = Math.round(Number(later[i].span) || 0) - Math.round(Number(prior[i].span) || 0)
+    if (!delta) continue
+    var span = Math.round(Number(next.sections[i].span) || 0) + delta
+    var minSpan = sectionMinimum(next.sections[i].items, iconSlot, keybindSlot, gap)
+    if (span < minSpan) span = minSpan
+    next.sections[i].span = span
+  }
+  return next
+}
+
 function resizeTail(layout, delta, minSpan) {
   var count = groupCount(layout)
   if (!count) return cloneLayout(layout)
@@ -400,7 +416,12 @@ function parseDockConfig(rawText, pluginId) {
     autoHide: true,
     barEdge: "bottom",
     globalChanges: false,
+    globalIcons: true,
+    globalSections: true,
     workspaceLooks: {},
+    customMenu: null,
+    iconMenu: null,
+    helpWindow: null,
     hasWorkspaceMap: false,
     hasDefaultLayout: false
   }
@@ -426,6 +447,40 @@ function parseDockConfig(rawText, pluginId) {
           cfg.barEdge = entry.barEdge
         if (entry.globalChanges !== undefined && entry.globalChanges !== null)
           cfg.globalChanges = entry.globalChanges === true || entry.globalChanges === 1 || entry.globalChanges === "true"
+        if (entry.globalIcons !== undefined && entry.globalIcons !== null)
+          cfg.globalIcons = entry.globalIcons === true || entry.globalIcons === 1 || entry.globalIcons === "true"
+        if (entry.globalSections !== undefined && entry.globalSections !== null)
+          cfg.globalSections = entry.globalSections === true || entry.globalSections === 1 || entry.globalSections === "true"
+        if (entry.customMenu && typeof entry.customMenu === "object") {
+          cfg.customMenu = {
+            placed: entry.customMenu.placed === true,
+            sized: entry.customMenu.sized === true,
+            x: Number(entry.customMenu.x) || 0,
+            y: Number(entry.customMenu.y) || 0,
+            w: Number(entry.customMenu.w) || 0,
+            h: Number(entry.customMenu.h) || 0
+          }
+        }
+        if (entry.iconMenu && typeof entry.iconMenu === "object") {
+          cfg.iconMenu = {
+            placed: entry.iconMenu.placed === true,
+            sized: entry.iconMenu.sized === true,
+            x: Number(entry.iconMenu.x) || 0,
+            y: Number(entry.iconMenu.y) || 0,
+            w: Number(entry.iconMenu.w) || 0,
+            h: Number(entry.iconMenu.h) || 0
+          }
+        }
+        if (entry.helpWindow && typeof entry.helpWindow === "object") {
+          cfg.helpWindow = {
+            placed: entry.helpWindow.placed === true,
+            sized: entry.helpWindow.sized === true,
+            x: Number(entry.helpWindow.x) || 0,
+            y: Number(entry.helpWindow.y) || 0,
+            w: Number(entry.helpWindow.w) || 0,
+            h: Number(entry.helpWindow.h) || 0
+          }
+        }
         if (entry.workspaceLooks && typeof entry.workspaceLooks === "object")
           cfg.workspaceLooks = cloneLookMap(entry.workspaceLooks)
         if (entry.defaultLayout && typeof entry.defaultLayout === "object") {

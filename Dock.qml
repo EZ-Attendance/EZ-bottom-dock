@@ -43,6 +43,8 @@ Item {
   property var workspaceLayouts: ({})
   property var workspaceTouched: ({})
   property bool globalChanges: false
+  property bool globalIcons: true
+  property bool globalSections: true
   // Per-workspace bar edge, size, color, popups, and auto-hide.
   // Missing keys use defaultLook, which is what a new workspace inherits.
   property var workspaceLooks: ({})
@@ -85,6 +87,9 @@ Item {
   property string dragGhostBadge: ""
   property real dragGhostX: 0
   property real dragGhostY: 0
+  // The moving icon is only for the screen under the pointer. Other
+  // workspaces stay still, including when Global Changes is on.
+  property string dragScreenName: ""
   property int toplevelRevision: 0
   // Mapped Hyprland clients, refreshed on open/close/move. Keybind underlines
   // follow this list so they clear when the window is gone.
@@ -117,6 +122,22 @@ Item {
   property string labelEditTarget: ""
   property real menuX: 0
   property real menuY: 0
+  // Last place and size of the task bar customization window.
+  property bool customMenuPlaced: false
+  property real customMenuX: 0
+  property real customMenuY: 0
+  property bool customMenuSized: false
+  property real customMenuW: 0
+  property real customMenuH: 0
+  property bool iconMenuPlaced: false
+  property real iconMenuX: 0
+  property real iconMenuY: 0
+  property bool iconMenuSized: false
+  property real iconMenuW: 0
+  property real iconMenuH: 0
+  property bool helpWindowSized: false
+  property real helpWindowW: 0
+  property real helpWindowH: 0
   property var menuScreen: null
   property string pickerQuery: ""
   property int pickerSelectedIndex: 0
@@ -408,6 +429,11 @@ Item {
     helpPosY = Number(data.y)
     helpPosScreen = String(data.screen || "")
     helpPosSet = true
+    if (data.sized === true) {
+      helpWindowSized = true
+      helpWindowW = Number(data.w) || 0
+      helpWindowH = Number(data.h) || 0
+    }
   }
 
   function saveHelpPos(screenName) {
@@ -415,8 +441,12 @@ Item {
     helpPosFile.setText(JSON.stringify({
       x: helpPosX,
       y: helpPosY,
-      screen: helpPosScreen
+      screen: helpPosScreen,
+      sized: !!helpWindowSized,
+      w: Math.round(helpWindowW),
+      h: Math.round(helpWindowH)
     }) + "\n")
+    persistSettings()
   }
 
   // Hyprland uses Super+left-drag to move windows and swallows that gesture
@@ -624,7 +654,7 @@ Item {
   function sectionHasIcons(index) {
     var i = Math.round(Number(index))
     if (DockModel.sectionLength(layout, i) > 0) return true
-    if (!globalChanges) return false
+    if (!globalSectionsActive()) return false
     var ids = knownWorkspaceIds()
     for (var n = 0; n < ids.length; n++) {
       if (DockModel.sectionLength(layoutForWorkspaceKey(ids[n]), i) > 0) return true
@@ -642,7 +672,7 @@ Item {
   function dropSection(index) {
     var i = Math.round(Number(index))
     removeSectionPick = -1
-    commitLayout(function(current) { return DockModel.removeSection(current, i) })
+    commitLayout(function(current) { return DockModel.removeSection(current, i) }, "sections")
   }
 
   function askRemoveSection(index) {
@@ -679,7 +709,7 @@ Item {
     commitLayout(function(current) {
       if (DockModel.groupCount(current) >= DockModel.maxSections()) return current
       return DockModel.addSection(current, span)
-    })
+    }, "sections")
   }
 
   function beginSectionResize(panel, index, along) {
@@ -722,12 +752,23 @@ Item {
 
   function endSectionResize() {
     if (resizeBoundaryIndex < 0) return
-    var next = DockModel.cloneLayout(layout)
+    var before = resizeBaseLayout ? DockModel.cloneLayout(resizeBaseLayout) : null
+    var after = DockModel.cloneLayout(layout)
     resizeBoundaryIndex = -1
     resizeTail = false
     resizeBaseLayout = null
     resizeFrozenLead = -1
-    persistLayout(next)
+    if (before && globalSectionsActive()) {
+      var slot = iconSize
+      var keybind = iconSize + Style.space(16)
+      var gap = Style.space(4)
+      layout = DockModel.cloneLayout(before)
+      commitLayout(function(current) {
+        return DockModel.applySpanDeltas(current, before, after, slot, keybind, gap)
+      }, "sections")
+      return
+    }
+    persistLayout(after)
   }
 
   function ensureMenuScreen() {
@@ -1041,6 +1082,22 @@ Item {
     return DockModel.lookForWorkspace(workspaceLooks, id, defaultLook)
   }
 
+  // One tone is an 8% step in lightness. Three tones is the watermark on an empty section.
+  function shiftTones(color, steps) {
+    var c = color
+    var light = c.hslLightness + 0.08 * steps
+    light = Math.max(0, Math.min(1, light))
+    return Qt.hsla(c.hslHue, c.hslSaturation, light, 1)
+  }
+
+  function darkerTones(color, steps) {
+    return shiftTones(color, -Math.max(0, steps))
+  }
+
+  function lighterTones(color, steps) {
+    return shiftTones(color, Math.max(0, steps))
+  }
+
   function fillForLook(look) {
     var src = look || lookFor(workspaceId)
     var hex = DockModel.resolveThemeColor(themePalette, src.bgColorKey, src.bgColorHex)
@@ -1135,7 +1192,33 @@ Item {
         autoHide: shared.autoHide,
         barEdge: shared.barEdge,
         globalChanges: !!globalChanges,
-        workspaceLooks: DockModel.cloneLookMap(workspaceLooks)
+        globalIcons: !!globalIcons,
+        globalSections: !!globalSections,
+        workspaceLooks: DockModel.cloneLookMap(workspaceLooks),
+        customMenu: {
+          placed: !!customMenuPlaced,
+          sized: !!customMenuSized,
+          x: Math.round(customMenuX),
+          y: Math.round(customMenuY),
+          w: Math.round(customMenuW),
+          h: Math.round(customMenuH)
+        },
+        iconMenu: {
+          placed: !!iconMenuPlaced,
+          sized: !!iconMenuSized,
+          x: Math.round(iconMenuX),
+          y: Math.round(iconMenuY),
+          w: Math.round(iconMenuW),
+          h: Math.round(iconMenuH)
+        },
+        helpWindow: {
+          placed: !!helpPosSet,
+          sized: !!helpWindowSized,
+          x: Math.round(helpPosX),
+          y: Math.round(helpPosY),
+          w: Math.round(helpWindowW),
+          h: Math.round(helpWindowH)
+        }
       }
       try { payload = JSON.parse(JSON.stringify(payload)) } catch (e) {}
       shell.updateEntryInline(pluginId, payload)
@@ -1152,10 +1235,22 @@ Item {
     persistSettings()
   }
 
-  // mutator(layout) -> layout. Global Changes replays it on every workspace.
-  function commitLayout(mutator) {
+  function globalIconsActive() {
+    return globalChanges && globalIcons
+  }
+
+  function globalSectionsActive() {
+    return globalChanges && globalSections
+  }
+
+  // mutator(layout) -> layout. scope "icons" or "sections" follows that
+  // checkbox, and only when Global Changes is on. Anything else follows the toggle alone.
+  function commitLayout(mutator, scope) {
     if (typeof mutator !== "function") return
-    if (!globalChanges) {
+    var spread = globalChanges
+    if (scope === "icons") spread = globalIconsActive()
+    else if (scope === "sections") spread = globalSectionsActive()
+    if (!spread) {
       persistLayout(mutator(DockModel.cloneLayout(layout)))
       return
     }
@@ -1210,7 +1305,7 @@ Item {
     if (!menuItem) return
     var copy = DockModel.cloneItem(menuItem)
     var span = spanFloor()
-    commitLayout(function(current) { return DockModel.addItemGrowing(current, key, copy, span) })
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, key, copy, span) }, "icons")
   }
 
   function setItemOnWorkspace(item, id, enabled) {
@@ -1221,7 +1316,7 @@ Item {
     var current = DockModel.cloneLayout(layoutForWorkspaceKey(key))
     var span = spanFloor()
     var next = enabled
-      ? (globalChanges
+      ? (globalIconsActive()
         ? DockModel.addItemGrowing(current, itemPlaceSection, copy, span)
         : DockModel.addItemClamped(current, itemPlaceSection, copy, span))
       : DockModel.removeItem(current, copy.id)
@@ -1391,7 +1486,7 @@ Item {
       var mark = String(labelDraft || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 3)
       if (mark.length && mark !== String(menuItem.badge || "").toUpperCase()) {
         var badgeId = menuItem.id
-        commitLayout(function(current) { return DockModel.setItemBadge(current, badgeId, mark) })
+        commitLayout(function(current) { return DockModel.setItemBadge(current, badgeId, mark) }, "icons")
         var marked = DockModel.findItem(layout, menuItem.id)
         if (marked)
           menuItem = marked
@@ -1410,7 +1505,7 @@ Item {
     }
     if (name !== DockModel.itemLabel(menuItem)) {
       var renameId = menuItem.id
-      commitLayout(function(current) { return DockModel.renameItem(current, renameId, name) })
+      commitLayout(function(current) { return DockModel.renameItem(current, renameId, name) }, "icons")
       var found = DockModel.findItem(layout, menuItem.id)
       if (found)
         menuItem = found
@@ -1499,6 +1594,7 @@ Item {
     dropIndex = 0
     dragGhostSource = item.kind === "keybind" ? "" : iconSource(item.icon)
     dragGhostBadge = item.kind === "keybind" ? String(item.badge || "").slice(0, 3) : ""
+    dragScreenName = screenNameOf(screen)
     armReveal(screen)
   }
 
@@ -1523,7 +1619,7 @@ Item {
       var span = spanFloor()
       commitLayout(function(current) {
         return DockModel.moveItemAtGrowing(current, itemId, section, index, span, copy)
-      })
+      }, "icons")
     }
     cancelIconDrag()
   }
@@ -1535,6 +1631,7 @@ Item {
     dropIndex = 0
     dragGhostSource = ""
     dragGhostBadge = ""
+    dragScreenName = ""
     releaseRevealSoon()
   }
 
@@ -1567,6 +1664,32 @@ Item {
     workspaceTouched = touched
 
     globalChanges = cfg.globalChanges === true
+    globalIcons = cfg.globalIcons !== false
+    globalSections = cfg.globalSections !== false
+    if (cfg.customMenu) {
+      customMenuPlaced = cfg.customMenu.placed === true
+      customMenuSized = cfg.customMenu.sized === true
+      customMenuX = Number(cfg.customMenu.x) || 0
+      customMenuY = Number(cfg.customMenu.y) || 0
+      customMenuW = Number(cfg.customMenu.w) || 0
+      customMenuH = Number(cfg.customMenu.h) || 0
+    }
+    if (cfg.iconMenu) {
+      iconMenuPlaced = cfg.iconMenu.placed === true
+      iconMenuSized = cfg.iconMenu.sized === true
+      iconMenuX = Number(cfg.iconMenu.x) || 0
+      iconMenuY = Number(cfg.iconMenu.y) || 0
+      iconMenuW = Number(cfg.iconMenu.w) || 0
+      iconMenuH = Number(cfg.iconMenu.h) || 0
+    }
+    if (cfg.helpWindow) {
+      helpPosSet = cfg.helpWindow.placed === true
+      helpPosX = Number(cfg.helpWindow.x) || 0
+      helpPosY = Number(cfg.helpWindow.y) || 0
+      helpWindowSized = cfg.helpWindow.sized === true
+      helpWindowW = Number(cfg.helpWindow.w) || 0
+      helpWindowH = Number(cfg.helpWindow.h) || 0
+    }
     defaultLook = DockModel.cloneLook({
       barEdge: cfg.barEdge,
       iconSize: cfg.iconSize > 0 ? cfg.iconSize : DockModel.defaultIconSize(),
@@ -2018,7 +2141,7 @@ Item {
     var section = pendingSection
     var item = DockModel.makeAppItem(entry)
     var span = spanFloor()
-    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) }, "icons")
     closeMenus()
   }
 
@@ -2027,7 +2150,7 @@ Item {
     var section = pendingSection
     var item = DockModel.makePluginItem(plugin)
     var span = spanFloor()
-    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) }, "icons")
     closeMenus()
   }
 
@@ -2036,7 +2159,7 @@ Item {
     var section = pendingSection
     var item = DockModel.makeKeybindItem(row, layout)
     var span = spanFloor()
-    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) }, "icons")
     closeMenus()
   }
 
@@ -2056,7 +2179,7 @@ Item {
     var section = pendingSection
     var item = DockModel.makeWebItem(name, url)
     var span = spanFloor()
-    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) }, "icons")
     closeMenus()
   }
 
@@ -2928,6 +3051,8 @@ Item {
             required property var modelData
             required property int index
             sectionName: String(index)
+            sectionIndex: index
+            sectionCount: sectionRepeater.count
             leadGap: index > 0 ? dockWindow.screenGroupGap : 0
             sectionSpan: {
               var _tick = root.resizePreviewTick
@@ -2965,10 +3090,11 @@ Item {
         }
       }
 
-      // Drag ghost + insert marker overlay
+      // Drag ghost + insert marker overlay. One per monitor, so the
+      // shared drag state has to be limited to the screen that started it.
       Item {
         anchors.fill: parent
-        visible: root.dragging
+        visible: root.dragging && root.dragScreenName.length > 0 && (dockWindow.outputName === root.dragScreenName || root.screenNameOf(dockWindow.screen) === root.dragScreenName)
         z: 100
 
         // Drop insert caret in the active section
@@ -3060,6 +3186,7 @@ Item {
     property Item chromeItem: null
     property bool canResize: false
     readonly property color ink: root.globalChanges ? "#39FF14" : "#FF3131"
+    readonly property color barColor: panel && panel.screenFill ? panel.screenFill : root.barFill
     readonly property int gap: Style.space(8)
     readonly property int rule: Math.max(2, Math.round(Style.space(1)))
     readonly property int ruleLength: Math.round(slot * 0.72)
@@ -3222,6 +3349,13 @@ Item {
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         cursorShape: Qt.PointingHandCursor
+        function showGlobeTip() {
+          if (!toggleRoot.panel || !toggleRoot.chromeItem) return
+          var p = mapToItem(toggleRoot.chromeItem, width / 2, 0)
+          var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
+          var label = root.globalChanges ? "Global changes" : "Local changes"
+          root.showIconTip(toggleRoot.screen, g.x, g.y, label)
+        }
         onClicked: function(mouse) {
           if (mouse.button === Qt.RightButton) {
             if (!toggleRoot.panel || !toggleRoot.chromeItem) return
@@ -3231,14 +3365,9 @@ Item {
             return
           }
           root.toggleGlobalChanges()
+          showGlobeTip()
         }
-        onEntered: {
-          if (!toggleRoot.panel || !toggleRoot.chromeItem) return
-          var p = mapToItem(toggleRoot.chromeItem, width / 2, 0)
-          var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
-          var label = root.globalChanges ? "Global changes" : "Local changes"
-          root.showIconTip(toggleRoot.screen, g.x, g.y, label)
-        }
+        onEntered: showGlobeTip()
         onExited: root.hideIconTip()
       }
     }
@@ -3250,12 +3379,24 @@ Item {
       width: toggleRoot.slot
       height: toggleRoot.slot
 
+      Rectangle {
+        anchors.fill: parent
+        anchors.margins: gearMouse.containsMouse ? 0 : 1
+        radius: Style.space(8)
+        color: gearMouse.containsMouse
+          ? Qt.rgba(toggleRoot.barColor.r, toggleRoot.barColor.g, toggleRoot.barColor.b, 0.55)
+          : "transparent"
+        Behavior on color { ColorAnimation { duration: 140 } }
+      }
+
       Canvas {
         id: gearMark
         anchors.centerIn: parent
         width: parent.width - Style.space(4)
         height: width
-        property color ink: gearMouse.containsMouse ? Color.accent : root.ink
+        property color ink: gearMouse.containsMouse
+          ? root.lighterTones(toggleRoot.barColor, 5)
+          : root.lighterTones(toggleRoot.barColor, 3)
         onPaint: {
           var ctx = getContext("2d")
           var w = width
@@ -3314,6 +3455,8 @@ Item {
   component DockSection: Item {
     id: sectionRoot
     property string sectionName: "center"
+    property int sectionIndex: 0
+    property int sectionCount: 1
     property var model: []
     property var hostScreen: null
     property var panelWindow: null
@@ -3392,8 +3535,32 @@ Item {
     Rectangle {
       anchors.fill: parent
       radius: Style.space(6)
-      visible: root.dragging && root.dropSection === sectionRoot.sectionName
+      visible: root.dragging && root.dropSection === sectionRoot.sectionName && root.dragScreenName === root.screenNameOf(sectionRoot.hostScreen)
       color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.08)
+    }
+
+    Item {
+      // Stay under the icons. The count comes from the icon repeater so the
+      // mark disappears as soon as a delegate exists, not from a stale length.
+      visible: sectionIcons.count === 0
+      enabled: false
+      z: 0
+      x: sectionRoot.vertical ? 0 : sectionRoot.leadGap
+      y: sectionRoot.vertical ? sectionRoot.leadGap : 0
+      width: sectionRoot.vertical ? parent.width : Math.max(0, parent.width - sectionRoot.leadGap)
+      height: sectionRoot.vertical ? Math.max(0, parent.height - sectionRoot.leadGap) : parent.height
+
+      Text {
+        anchors.centerIn: parent
+        textFormat: Text.PlainText
+        text: (sectionRoot.sectionIndex + 1) + "/" + Math.max(1, sectionRoot.sectionCount)
+        color: root.darkerTones(sectionRoot.panelWindow && sectionRoot.panelWindow.screenFill ? sectionRoot.panelWindow.screenFill : root.barFill, 5)
+        font.family: Style.font.family
+        font.pixelSize: Math.max(10, Math.round(sectionRoot.iconSlot * 0.42)) + 1
+        font.bold: false
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+      }
     }
 
     Item {
@@ -3463,9 +3630,11 @@ Item {
 
     Item {
       id: sectionRow
+      z: 2
       anchors.fill: parent
 
       Repeater {
+        id: sectionIcons
         model: sectionRoot.model
         delegate: Item {
           id: iconWrap
@@ -3482,7 +3651,7 @@ Item {
           }
           width: keybindIcon && sectionRoot.barEdge === "bottom" ? sectionRoot.keybindSlot : sectionRoot.iconSlot
           height: keybindIcon && sectionRoot.barEdge !== "bottom" ? sectionRoot.keybindSlot : sectionRoot.iconSlot
-          opacity: root.dragging && root.dragItem && root.dragItem.id === modelData.id ? 0.35 : 1
+          opacity: root.dragging && root.dragScreenName === root.screenNameOf(sectionRoot.hostScreen) && root.dragItem && root.dragItem.id === modelData.id ? 0.35 : 1
 
           Item {
             id: iconMotion
@@ -4063,14 +4232,66 @@ Item {
 
     BorderSurface {
       id: menuCard
-      width: root.menuItem ? Style.space(260) : Math.min(Style.space(380), parent.width - Style.space(24))
-      height: menuColumn.implicitHeight + contentTopInset + contentBottomInset
+      // Task bar customization keeps a size and position of its own.
+      // The icon menu still opens at the pointer and sizes to its rows.
+      readonly property real minBarW: Style.space(280)
+      readonly property real minBarH: Style.space(240)
+      readonly property real minIconW: Style.space(220)
+      readonly property real minIconH: Style.space(180)
+      readonly property real naturalW: Math.min(Style.space(380), Math.max(minBarW, parent.width - Style.space(24)))
+      readonly property real naturalH: Math.min(barSettings.implicitHeight + barMenuTitle.height + contentTopInset + contentBottomInset + Style.space(8), Math.max(minBarH, parent.height - Style.space(16)))
+      property real dragPressX: 0
+      property real dragPressY: 0
+      property real dragOriginX: 0
+      property real dragOriginY: 0
+      property bool resizing: false
+      property real resizePinX: 0
+      property real resizePinY: 0
+      width: root.menuItem
+        ? (root.iconMenuSized ? Math.min(Math.max(minIconW, root.iconMenuW), parent.width - Style.space(16)) : Style.space(260))
+        : (root.customMenuSized ? Math.min(Math.max(minBarW, root.customMenuW), parent.width - Style.space(16)) : naturalW)
+      height: root.menuItem
+        ? (root.iconMenuSized ? Math.min(Math.max(minIconH, root.iconMenuH), parent.height - Style.space(16)) : (menuColumn.implicitHeight + contentTopInset + contentBottomInset))
+        : (root.customMenuSized ? Math.min(Math.max(minBarH, root.customMenuH), parent.height - Style.space(16)) : naturalH)
       radius: Style.cornerRadius
       color: root.menuBackground
       borderSpec: root.menuBorderSpec
       padding: Style.space(6)
+      function dragPoint(item, lx, ly) {
+        return item.mapToItem(parent, lx, ly)
+      }
+      function dragStart(item, lx, ly) {
+        var p = dragPoint(item, lx, ly)
+        dragPressX = p.x
+        dragPressY = p.y
+        dragOriginX = x
+        dragOriginY = y
+      }
+      function dragMove(item, lx, ly) {
+        var p = dragPoint(item, lx, ly)
+        park(dragOriginX + p.x - dragPressX, dragOriginY + p.y - dragPressY)
+      }
+      function park(px, py) {
+        var margin = Style.space(8)
+        var nx = Math.min(Math.max(margin, px), parent.width - width - margin)
+        var ny = Math.min(Math.max(margin, py), parent.height - height - margin)
+        if (root.menuItem) {
+          root.iconMenuX = nx
+          root.iconMenuY = ny
+          root.iconMenuPlaced = true
+        } else {
+          root.customMenuX = nx
+          root.customMenuY = ny
+          root.customMenuPlaced = true
+        }
+      }
       x: {
         var margin = Style.space(8)
+        if (resizing) return resizePinX
+        if (root.menuItem && root.iconMenuPlaced)
+          return Math.min(Math.max(margin, root.iconMenuX), parent.width - width - margin)
+        if (!root.menuItem && root.customMenuPlaced)
+          return Math.min(Math.max(margin, root.customMenuX), parent.width - width - margin)
         var left = root.menuX - width / 2
         if (menuWindow.menuMetrics.barEdge === "left")
           left = root.menuX + Style.space(8) - menuWindow.menuMetrics.barCross
@@ -4080,6 +4301,11 @@ Item {
       }
       y: {
         var margin = Style.space(8)
+        if (resizing) return resizePinY
+        if (root.menuItem && root.iconMenuPlaced)
+          return Math.min(Math.max(margin, root.iconMenuY), parent.height - height - margin)
+        if (!root.menuItem && root.customMenuPlaced)
+          return Math.min(Math.max(margin, root.customMenuY), parent.height - height - margin)
         var top = root.menuY - height - Style.space(10)
         if (menuWindow.menuMetrics.barEdge !== "bottom")
           top = root.menuY - height / 2
@@ -4094,6 +4320,10 @@ Item {
         anchors.leftMargin: menuCard.contentLeftInset
         anchors.rightMargin: menuCard.contentRightInset
         anchors.topMargin: menuCard.contentTopInset
+        height: root.menuItem
+          ? (root.iconMenuSized ? Math.max(0, menuCard.height - menuCard.contentTopInset - menuCard.contentBottomInset) : implicitHeight)
+          : Math.max(0, menuCard.height - menuCard.contentTopInset - menuCard.contentBottomInset)
+        clip: root.menuItem && root.iconMenuSized
         spacing: 2
 
         // Selected icon identity: same glyph and label as the dock tooltip.
@@ -4102,6 +4332,27 @@ Item {
           visible: !!root.menuItem
           width: parent.width
           height: visible ? Style.space(44) : 0
+
+          MouseArea {
+            z: 3
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: itemMenuInfo.left
+            cursorShape: Qt.SizeAllCursor
+            preventStealing: true
+            enabled: itemMenuHeader.visible && !root.labelEdit
+            onPressed: function(mouse) { menuCard.dragStart(this, mouse.x, mouse.y) }
+            onPositionChanged: function(mouse) {
+              if (!(mouse.buttons & Qt.LeftButton)) return
+              menuCard.dragMove(this, mouse.x, mouse.y)
+            }
+            onReleased: root.persistSettings()
+            onDoubleClicked: {
+              if (root.menuItem && root.menuItem.kind !== "keybind")
+                root.beginLabelEdit()
+            }
+          }
 
           Image {
             id: itemMenuHeaderIcon
@@ -4227,18 +4478,69 @@ Item {
           }
         }
 
-        Column {
+        Item {
+          id: barMenuBody
           visible: !root.menuItem
           width: parent.width
-          spacing: Style.spacing.md
+          height: visible ? Math.max(0, menuColumn.height) : 0
 
           Item {
+            id: barMenuTitle
             width: parent.width
             height: Style.space(44)
 
-            Text {
+            MouseArea {
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              anchors.right: barMenuInfo.left
+              cursorShape: Qt.SizeAllCursor
+              preventStealing: true
+              onPressed: function(mouse) { menuCard.dragStart(this, mouse.x, mouse.y) }
+              onPositionChanged: function(mouse) {
+                if (!(mouse.buttons & Qt.LeftButton)) return
+                menuCard.dragMove(this, mouse.x, mouse.y)
+              }
+              onReleased: root.persistSettings()
+            }
+
+            Item {
+              id: barMenuTitleIcon
               anchors.verticalCenter: parent.verticalCenter
               anchors.left: parent.left
+              anchors.leftMargin: Style.space(8)
+              width: Style.space(18)
+              height: width
+              z: 2
+
+              Rectangle {
+                anchors.centerIn: parent
+                width: parent.width
+                height: Math.max(7, Math.round(parent.height * 0.46))
+                radius: height / 2
+                color: "transparent"
+                border.width: 1
+                border.color: root.menuForeground
+              }
+
+              Row {
+                anchors.centerIn: parent
+                spacing: 2
+                Repeater {
+                  model: 3
+                  Rectangle {
+                    width: 3
+                    height: 3
+                    radius: 1.5
+                    color: root.menuForeground
+                  }
+                }
+              }
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.left: barMenuTitleIcon.right
               anchors.leftMargin: Style.space(8)
               anchors.right: barMenuInfo.left
               anchors.rightMargin: Style.space(8)
@@ -4278,6 +4580,25 @@ Item {
               color: root.menuLine
             }
           }
+
+          Flickable {
+            id: barScroll
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: barMenuTitle.bottom
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Style.space(16)
+            clip: true
+            contentWidth: width
+            contentHeight: barSettings.implicitHeight
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height + 1
+
+            Column {
+              id: barSettings
+              width: barScroll.width
+              spacing: Style.spacing.md
 
           PanelSectionHeader {
             text: "ADD"
@@ -4336,13 +4657,29 @@ Item {
           }
 
           Item {
+            id: placementRadios
             width: parent.width
-            height: Style.space(24)
+            height: Math.max(Style.space(24), placementFlow.implicitHeight)
 
-            Row {
-              anchors.horizontalCenter: parent.horizontalCenter
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(16)
+            Text {
+              id: placementLabel
+              width: Style.space(92)
+              height: Style.space(24)
+              verticalAlignment: Text.AlignVCenter
+              textFormat: Text.PlainText
+              text: "Placement"
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+
+            Flow {
+              id: placementFlow
+              anchors.left: placementLabel.right
+              anchors.leftMargin: Style.spacing.sm
+              anchors.right: parent.right
+              spacing: Style.space(12)
 
               Repeater {
                 model: root.sectionChoices
@@ -4541,74 +4878,213 @@ Item {
             onClicked: root.toggleAutoHide()
           }
 
-          StatusToggle {
+          BorderSurface {
+            id: globalToggle
             width: parent.width
-            label: "Global Changes"
-            checked: root.globalChanges
-            onClicked: root.toggleGlobalChanges()
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.spacing.sm
+            implicitHeight: globalChecks.y + globalChecks.height + Style.space(8)
+            radius: Style.cornerRadius
+            color: Style.controlFill(false, globalSwitch.containsMouse, root.menuForeground, Color.accent)
+            borderSpec: Border.controlSpec(globalSwitch.containsMouse ? "hover-cursor" : "normal", root.menuForeground, Color.accent)
 
             Text {
-              width: Style.space(92)
-              anchors.verticalCenter: parent.verticalCenter
+              id: globalLabel
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(12)
+              anchors.top: parent.top
+              anchors.topMargin: Style.space(10)
               textFormat: Text.PlainText
-              text: "Sections"
+              text: "Global Changes"
               color: root.menuForeground
               font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.subtitle
               font.bold: true
             }
-            Repeater {
-              model: root.sectionChoices
-              delegate: Button {
-                required property var modelData
-                text: modelData.label
+
+            Row {
+              id: globalChecks
+              anchors.left: globalLabel.left
+              anchors.top: globalLabel.bottom
+              anchors.topMargin: Style.space(4)
+              spacing: Style.space(10)
+              opacity: root.globalChanges ? 1 : 0.4
+
+              Repeater {
+                model: [
+                  { key: "icons", label: "Icons" },
+                  { key: "sections", label: "Sections" }
+                ]
+                delegate: Item {
+                  required property var modelData
+                  readonly property bool on: modelData.key === "icons" ? root.globalIcons : root.globalSections
+                  width: globalCheck.implicitWidth
+                  height: Style.space(22)
+
+                  Row {
+                    id: globalCheck
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(6)
+
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(16)
+                      height: width
+                      radius: Style.space(3)
+                      color: "transparent"
+                      border.width: 1.5
+                      border.color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, on ? 0.9 : 0.45)
+
+                      Text {
+                        visible: on
+                        anchors.centerIn: parent
+                        anchors.verticalCenterOffset: -1
+                        textFormat: Text.PlainText
+                        text: "✓"
+                        color: root.menuForeground
+                        font.family: Style.font.menuFamily
+                        font.pixelSize: Style.space(13)
+                        font.bold: true
+                      }
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      text: modelData.label
+                      color: root.menuForeground
+                      font.family: Style.font.menuFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: on
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      if (modelData.key === "icons") root.globalIcons = !root.globalIcons
+                      else root.globalSections = !root.globalSections
+                      root.persistSettings()
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              id: globalTrack
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: globalLabel.verticalCenter
+              width: Style.space(44)
+              height: Style.space(24)
+              radius: height / 2
+              color: root.globalChanges ? "#2f9e44" : "#d64545"
+              Behavior on color { ColorAnimation { duration: 120 } }
+
+              Rectangle {
+                width: parent.height - Style.space(4)
+                height: width
+                radius: height / 2
+                anchors.verticalCenter: parent.verticalCenter
+                x: root.globalChanges ? parent.width - width - Style.space(2) : Style.space(2)
+                color: "#ffffff"
+                Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+              }
+
+              MouseArea {
+                id: globalSwitch
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleGlobalChanges()
+              }
+            }
+          }
+
+          Column {
+            id: sectionPicker
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property int sectionCount: root.sectionChoices ? root.sectionChoices.length : 0
+            readonly property real circleGap: Style.space(4)
+            readonly property real circleMax: Style.space(28)
+            readonly property real circleMin: Style.space(18)
+            readonly property real circle: {
+              var n = Math.max(1, sectionCount)
+              var avail = Math.max(circleMin, width)
+              var fitted = Math.floor((avail - circleGap * Math.max(0, n - 1)) / n)
+              return Math.max(circleMin, Math.min(circleMax, fitted))
+            }
+
+            Row {
+              height: Style.space(28)
+              spacing: Style.spacing.sm
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: "Sections"
+                color: root.menuForeground
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              Button {
+                text: "+"
                 bordered: true
-                selected: root.removeSectionPick === modelData.value
                 foreground: root.menuForeground
                 accent: Color.accent
                 fontFamily: Style.font.menuFamily
-                fontSize: Style.font.bodySmall
                 horizontalPadding: 0
                 verticalPadding: 0
                 width: Style.space(28)
                 height: width
                 radius: width / 2
-                onClicked: root.toggleSectionPick(modelData.value)
+                enabled: DockModel.groupCount(root.layout) < DockModel.maxSections()
+                onClicked: root.addUserSection()
+              }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.menuForeground
+                accent: Color.accent
+                fontFamily: Style.font.menuFamily
+                horizontalPadding: 0
+                verticalPadding: 0
+                width: Style.space(28)
+                height: width
+                radius: width / 2
+                enabled: root.removeSectionPick >= 0
+                opacity: enabled ? 1 : 0.35
+                onClicked: root.askRemoveSection(root.removeSectionPick)
               }
             }
-            Button {
-              text: "+"
-              bordered: true
-              foreground: root.menuForeground
-              accent: Color.accent
-              fontFamily: Style.font.menuFamily
-              horizontalPadding: 0
-              verticalPadding: 0
-              width: Style.space(28)
-              height: width
-              radius: width / 2
-              enabled: DockModel.groupCount(root.layout) < DockModel.maxSections()
-              onClicked: root.addUserSection()
-            }
-            Button {
-              text: "−"
-              bordered: true
-              foreground: root.menuForeground
-              accent: Color.accent
-              fontFamily: Style.font.menuFamily
-              horizontalPadding: 0
-              verticalPadding: 0
-              width: Style.space(28)
-              height: width
-              radius: width / 2
-              enabled: root.removeSectionPick >= 0
-              opacity: enabled ? 1 : 0.35
-              onClicked: root.askRemoveSection(root.removeSectionPick)
+
+            Flow {
+              width: parent.width
+              spacing: sectionPicker.circleGap
+
+              Repeater {
+                model: root.sectionChoices
+                delegate: Button {
+                  required property var modelData
+                  text: modelData.label
+                  bordered: true
+                  selected: root.removeSectionPick === modelData.value
+                  foreground: root.menuForeground
+                  accent: Color.accent
+                  fontFamily: Style.font.menuFamily
+                  fontSize: Math.max(9, Math.round(sectionPicker.circle * 0.42))
+                  horizontalPadding: 0
+                  verticalPadding: 0
+                  width: sectionPicker.circle
+                  height: width
+                  radius: width / 2
+                  onClicked: root.toggleSectionPick(modelData.value)
+                }
+              }
             }
           }
 
@@ -4630,7 +5106,7 @@ Item {
               text: "You about to remove section " + (root.confirmSectionIndex + 1)
                     + " from Workspace " + root.workspaceId
                     + " and all of its icon contents. To keep any icons move them to other sections first or they will be removed"
-                    + (root.globalChanges ? " The same section will be removed on every workspace." : "")
+                    + (root.globalSectionsActive() ? " The same section will be removed on every workspace." : "")
               color: root.menuForeground
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.bodySmall
@@ -4654,6 +5130,8 @@ Item {
                 fontFamily: Style.font.menuFamily
                 onClicked: root.commitRemoveSection()
               }
+            }
+          }
             }
           }
         }
@@ -4987,7 +5465,7 @@ Item {
             root.menuItem = null
             root.labelDraft = ""
             root.labelEdit = false
-            root.commitLayout(function(current) { return DockModel.removeItem(current, id) })
+            root.commitLayout(function(current) { return DockModel.removeItem(current, id) }, "icons")
             root.closeMenus()
           }
         }
@@ -5008,6 +5486,139 @@ Item {
           if (!inside)
             root.commitLabelEdit()
           mouse.accepted = false
+        }
+      }
+
+      Item {
+        id: dragGrip
+        z: 40
+        width: Style.space(18)
+        height: width
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.leftMargin: Style.space(2)
+        anchors.topMargin: Style.space(2)
+
+        Column {
+          anchors.centerIn: parent
+          spacing: 2
+          Repeater {
+            model: 3
+            Row {
+              spacing: 2
+              Repeater {
+                model: 2
+                Rectangle {
+                  width: 2
+                  height: 2
+                  radius: 1
+                  color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.8)
+                }
+              }
+            }
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.SizeAllCursor
+          preventStealing: true
+          onPressed: function(mouse) { menuCard.dragStart(this, mouse.x, mouse.y) }
+          onPositionChanged: function(mouse) {
+            if (!(mouse.buttons & Qt.LeftButton)) return
+            menuCard.dragMove(this, mouse.x, mouse.y)
+          }
+          onReleased: root.persistSettings()
+        }
+      }
+
+      Item {
+        id: resizeGrip
+        z: 30
+        width: Style.space(28)
+        height: width
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+
+        Canvas {
+          id: gripCanvas
+          anchors.fill: parent
+          anchors.margins: Style.space(6)
+          onPaint: {
+            var ctx = getContext("2d")
+            var w = width
+            var h = height
+            ctx.clearRect(0, 0, w, h)
+            ctx.strokeStyle = Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.72)
+            ctx.lineWidth = Math.max(1.5, w * 0.08)
+            ctx.lineCap = "round"
+            var gaps = [0.22, 0.48, 0.74]
+            for (var i = 0; i < gaps.length; i++) {
+              var start = w * gaps[i]
+              ctx.beginPath()
+              ctx.moveTo(start, h - 1)
+              ctx.lineTo(w - 1, start)
+              ctx.stroke()
+            }
+          }
+          onWidthChanged: requestPaint()
+          onHeightChanged: requestPaint()
+          Connections {
+            target: root
+            function onMenuForegroundChanged() { gripCanvas.requestPaint() }
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.SizeFDiagCursor
+          preventStealing: true
+          property real pressX: 0
+          property real pressY: 0
+          property real startW: 0
+          property real startH: 0
+          onPressed: function(mouse) {
+            var p = mapToItem(menuCard.parent, mouse.x, mouse.y)
+            pressX = p.x
+            pressY = p.y
+            startW = menuCard.width
+            startH = menuCard.height
+            menuCard.resizePinX = menuCard.x
+            menuCard.resizePinY = menuCard.y
+            menuCard.resizing = true
+            if (root.menuItem) {
+              root.iconMenuW = startW
+              root.iconMenuH = startH
+              root.iconMenuSized = true
+            } else {
+              root.customMenuW = startW
+              root.customMenuH = startH
+              root.customMenuSized = true
+            }
+          }
+          onPositionChanged: function(mouse) {
+            if (!(mouse.buttons & Qt.LeftButton)) return
+            var p = mapToItem(menuCard.parent, mouse.x, mouse.y)
+            var maxW = menuCard.parent.width - menuCard.resizePinX - Style.space(8)
+            var maxH = menuCard.parent.height - menuCard.resizePinY - Style.space(8)
+            var minW = root.menuItem ? menuCard.minIconW : menuCard.minBarW
+            var minH = root.menuItem ? menuCard.minIconH : menuCard.minBarH
+            var nextW = Math.min(Math.max(minW, startW + p.x - pressX), maxW)
+            var nextH = Math.min(Math.max(minH, startH + p.y - pressY), maxH)
+            if (root.menuItem) {
+              root.iconMenuW = nextW
+              root.iconMenuH = nextH
+            } else {
+              root.customMenuW = nextW
+              root.customMenuH = nextH
+            }
+          }
+          onReleased: {
+            menuCard.resizing = false
+            menuCard.park(menuCard.resizePinX, menuCard.resizePinY)
+            root.persistSettings()
+          }
         }
       }
     }
@@ -5049,7 +5660,7 @@ Item {
         readonly property string purposeCopy: keybindHelp
           ? "A Keybind button icon runs one shortcut for the Super+K list. This popup allows the editing of text inside the button and the associated mouse over tooltip. It also helps with desired placement and the workspaces you would like it to appear in. Desired placement can be furthered by dragging and dropping the icon in the task bar itself."
           : barHelp
-            ? "Open task bar customization from the gear, or by right-clicking a blank part of the bar. Add icons, choose how many sections this workspace has, and change how the bar looks. Each workspace keeps its own icons, sections, and widths. Global Changes makes the next edit apply to every workspace. Dragging a separator does not."
+            ? "Open task bar customization from the gear, or by right-clicking a blank part of the bar. Add icons, choose where they go, and change how the bar looks. Drag the title or the corner grip to move this window. Drag the lower-right grip to resize it. The place and size are remembered. Each workspace keeps its own icons and sections unless Global Changes is on and the matching checkbox, Icons or Sections, is checked."
             : "Keeps the apps, plugins, and web links you use on a bar along one edge of the screen. Each workspace keeps its own icons, and each monitor shows the workspace on that screen."
 
         function plainText(html) {
@@ -5253,14 +5864,25 @@ Item {
           helpHitScroll.token = token
           helpHitScroll.restart()
         }
-        width: cardWidth
-        height: contentTopInset + helpTitleRow.height + sectionGap + helpSearchRow.height + sectionGap + helpFlick.height + Style.space(4) + helpCarets.height + contentBottomInset
+        readonly property real naturalHelpW: cardWidth
+        readonly property real helpChrome: contentTopInset + helpTitleRow.height + sectionGap + helpSearchRow.height + sectionGap + Style.space(4) + helpCarets.height + contentBottomInset
+        readonly property real naturalHelpH: helpChrome + (barHelp ? barHelpBody : Math.min(helpColumn.implicitHeight, maxBody))
+        property real dragPressX: 0
+        property real dragPressY: 0
+        property real dragOriginX: 0
+        property real dragOriginY: 0
+        property bool resizing: false
+        property real resizePinX: 0
+        property real resizePinY: 0
+        width: root.helpWindowSized ? Math.min(Math.max(Style.space(280), root.helpWindowW), Math.max(Style.space(280), parent.width - Style.space(16))) : naturalHelpW
+        height: root.helpWindowSized ? Math.min(Math.max(Style.space(220), root.helpWindowH), Math.max(Style.space(220), parent.height - Style.space(16))) : naturalHelpH
         radius: Style.cornerRadius
         color: root.menuBackground
         borderSpec: root.menuBorderSpec
         padding: Style.space(12)
         x: {
           var margin = Style.space(8)
+          if (resizing) return resizePinX
           var fallback = Math.max(margin, Math.round((parent.width - width) / 2))
           if (!root.helpPosSet) return fallback
           var maxX = Math.max(margin, parent.width - width - margin)
@@ -5268,11 +5890,37 @@ Item {
         }
         y: {
           var margin = Style.space(12)
+          if (resizing) return resizePinY
           var aboveMenu = menuCard.y - height - margin
           var fallback = Math.max(margin, Math.min(Math.round((menuCard.y - height) / 2), aboveMenu))
           if (!root.helpPosSet) return fallback
           var maxY = Math.max(margin, parent.height - height - margin)
           return Math.min(Math.max(margin, root.helpPosY), maxY)
+        }
+        function helpDragPoint(item, lx, ly) {
+          return item.mapToItem(parent, lx, ly)
+        }
+        function helpDragStart(item, lx, ly) {
+          var p = helpDragPoint(item, lx, ly)
+          dragPressX = p.x
+          dragPressY = p.y
+          dragOriginX = x
+          dragOriginY = y
+          root.helpPosX = x
+          root.helpPosY = y
+          root.helpPosSet = true
+          root.helpDragging = true
+        }
+        function helpDragMove(item, lx, ly) {
+          if (!root.helpDragging) return
+          var p = helpDragPoint(item, lx, ly)
+          var margin = Style.space(8)
+          root.helpPosX = Math.min(Math.max(margin, dragOriginX + p.x - dragPressX), parent.width - width - margin)
+          root.helpPosY = Math.min(Math.max(margin, dragOriginY + p.y - dragPressY), parent.height - height - margin)
+        }
+        function helpDragEnd() {
+          root.helpDragging = false
+          root.saveHelpPos(menuWindow.screen ? String(menuWindow.screen.name || "") : "")
         }
 
         // Holds clicks on the card so they do not fall through to the dismiss layer.
@@ -5305,6 +5953,21 @@ Item {
           anchors.topMargin: helpCard.contentTopInset
           height: Math.max(Style.space(28), helpClose.height)
 
+          MouseArea {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: helpClose.left
+            cursorShape: Qt.SizeAllCursor
+            preventStealing: true
+            onPressed: function(mouse) { helpCard.helpDragStart(this, mouse.x, mouse.y) }
+            onPositionChanged: function(mouse) {
+              if (!(mouse.buttons & Qt.LeftButton)) return
+              helpCard.helpDragMove(this, mouse.x, mouse.y)
+            }
+            onReleased: helpCard.helpDragEnd()
+          }
+
           Image {
             id: helpTitleIcon
             anchors.verticalCenter: parent.verticalCenter
@@ -5328,7 +5991,7 @@ Item {
             anchors.rightMargin: Style.space(8)
             elide: Text.ElideRight
             textFormat: Text.PlainText
-            text: helpCard.keybindHelp ? "KEYBIND" : (helpCard.barHelp ? "Task Bar Customization" : "Icon Placement")
+            text: helpCard.keybindHelp ? "KEYBIND" : (helpCard.barHelp ? "Task Bar Help" : "Icon Placement")
             color: root.menuForeground
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.heading
@@ -5507,9 +6170,9 @@ Item {
           anchors.leftMargin: helpCard.contentLeftInset
           anchors.rightMargin: helpCard.contentRightInset
           anchors.topMargin: helpCard.sectionGap
-          height: helpCard.barHelp
-            ? helpCard.barHelpBody
-            : Math.min(helpColumn.implicitHeight, helpCard.maxBody)
+          height: root.helpWindowSized
+            ? Math.max(Style.space(80), helpCard.height - helpCard.helpChrome)
+            : (helpCard.barHelp ? helpCard.barHelpBody : Math.min(helpColumn.implicitHeight, helpCard.maxBody))
           contentWidth: width
           contentHeight: helpColumn.implicitHeight
           clip: contentHeight > height + 1
@@ -5623,27 +6286,34 @@ Item {
                   "<b>Place</b> chooses Left, Center, or Right for this icon.",
                   "Check a <b>workspace</b> to show this icon there. Uncheck to remove that copy.",
                   "<b>Drag</b> the icon and drop it to move it along the bar.",
-                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on, it comes off every workspace.",
-                  "The <b>circled i</b> opens this help. The <b>circled X</b> closes the menu."
+                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on and <b>Icons</b> checked, it comes off every workspace.",
+                  "The <b>circled i</b> opens this help. Drag the title or the corner grip to move the help window, and the lower-right grip to resize it. The <b>circled X</b> closes the menu."
                 ] : helpCard.barHelp ? [
-                  "<b>App</b> adds a program. <b>Plugin</b> adds a shell plugin. <b>Web</b> adds a link. The numbers under those buttons choose which section receives the new icon.",
-                  "<b>KeyBind</b> adds a shortcut from the Super+K list. The task bar icon shows up to three letters from that shortcut name. Hover shows the name. Left-click runs the shortcut.",
-                  "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> adds an empty section at the end. A workspace can also have none.",
-                  "Click a section <b>number</b> to press it in. Click it again to release it. <b>−</b>, to the right of <b>+</b>, stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
+                  "Drag the <b>title</b>, or the grip in the upper-left corner, to move this window. Drag the grip in the <b>lower-right corner</b> to resize it. The window remembers where you left it and how large you made it.",
+                  "When the window is narrower, the <b>Placement</b> choices and the color swatches wrap onto the next line. The section number circles under <b>Sections</b> shrink, then wrap, so they stay inside the window.",
+                  "<b>App</b> adds a program. <b>Plugin</b> adds a shell plugin. <b>Web</b> adds a link. <b>KeyBind</b> adds a shortcut from the Super+K list. <b>Placement</b>, to the left of the round choices, picks which section receives the new icon. Those choices show every section. The first four stay on one line, and further sections continue on the next line.",
+                  "A keybind icon shows up to three letters. Hover shows its name. Left-click runs the shortcut.",
+                  "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> and <b>−</b> sit directly to the right of the word Sections. <b>+</b> adds an empty section at the end.",
+                  "The numbered circles under Sections are the sections themselves. Click a number to press it in. Click it again to release it. <b>−</b> stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
+                  "An empty section shows a faint <b>watermark</b>, such as 2/5: that section's number, then how many sections the bar has. The mark uses the task bar background, several tones darker, and disappears when an icon is placed in that section.",
                   "An <b>empty section</b> is removed at once. A section that still has icons asks first. <b>Cancel</b> keeps it. <b>Remove All</b> deletes the section and those icons.",
-                  "Drag a <b>separator</b> to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. The resize cursor shows while the pointer is over the line. The section moves only while <b>Super</b> is held or the mouse button is down. Releasing both stops the move. A section will not shrink smaller than its icons. This drag stays on the workspace you are changing, even when Global Changes is on.",
+                  "Drag a <b>separator</b> to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. The resize cursor shows while the pointer is over the line. The section moves only while <b>Super</b> is held or the mouse button is down. Releasing both stops the move. A section will not shrink smaller than its icons.",
                   "<b>Icon Size +</b> makes icons larger. <b>Icon Size −</b> makes them smaller. <b>Scroll</b> on the task bar does the same. Section widths scale with the icon size.",
                   "<b>Transparency +</b> makes the task bar more see-through. <b>Transparency −</b> makes it more solid. Hold <b>Alt and scroll</b> to do the same.",
-                  "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme.",
+                  "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme. The <b>gear</b> then takes that same color, three tones lighter. Hovering the gear lightens it further, and the highlight behind it uses the bar color.",
                   "<b>Icon popups</b> shows a name when you hover an icon. If that icon has a blinking underline, the popup also shows <b>(x)</b> to the right of the name, where x is how many of that item are open on this workspace.",
                   "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut.",
-                  "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section.",
+                  "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section. The moving picture stays on the screen where you started the drag.",
                   "Hold <b>Super and drag</b> a blank part of the task bar to the left, the right, or the bottom to move the task bar there.",
-                  "<b>Global Changes</b>, when on, applies the next edit to every workspace: icons added, moved, or removed, and the bar's edge, size, color, popups, and auto-hide. Adding or moving an icon into a section number that another workspace does not have yet adds empty sections there until that number exists. When off, the edit stays on the workspace you are changing.",
+                  "<b>Global Changes</b> is the switch on the right of that label. The <b>Icons</b> and <b>Sections</b> checkboxes sit directly under the words. A checked box shows a check mark. They are dimmed, and do nothing, while the switch is off.",
+                  "With the switch on and <b>Icons</b> checked, adding, moving, renaming, or removing an icon applies to every workspace. Adding or moving an icon into a section number that another workspace does not have yet adds empty sections there until that number exists. If Icons is not checked, those edits stay on the workspace you are changing.",
+                  "With the switch on and <b>Sections</b> checked, adding a section, removing one, or dragging a separator applies to every workspace. If Sections is not checked, those edits stay on this workspace.",
+                  "With the switch on, the bar's <b>edge, icon size, transparency, color, icon popups, and auto-hide</b> still apply to every workspace, whether or not Icons or Sections is checked. With the switch off, those stay on this workspace.",
                   "The <b>globe</b> after the last section is that same switch. Neon green is on. Neon red is off. It is shared by every workspace and cannot be moved or removed.",
                   "The <b>gear</b> to the right of the globe opens this settings menu, the same as a right-click on a blank part of the bar. It cannot be moved or removed.",
                   "<b>Auto hide task bar</b> hides the bar until the pointer reaches its edge. It stays open while the pointer is on the bar.",
-                  "A <b>blinking underline</b> under an icon means that item is open on this workspace."
+                  "A <b>blinking underline</b> under an icon means that item is open on this workspace.",
+                  "The <b>circled i</b> opens Task Bar Help. Drag its title or corner grip to move it, and the lower-right grip to resize it. That place and size are remembered too. The <b>circled X</b> closes the menu."
                 ] : [
                   "<b>Left-click an icon</b> to open another window on this workspace.",
                   "<b>Left-click a plugin</b> to toggle it. <b>Left-click a web link</b> to open it.",
@@ -5652,13 +6322,13 @@ Item {
                   "Click an icon, then <b>drag and drop</b> it to reposition it along the bar, including into Left, Center, or Right.",
                   "<b>Place</b> sets which numbered section this icon sits in.",
                   "Check a <b>workspace</b> to copy this icon there. Uncheck to remove that copy.",
-                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on, it comes off every workspace.",
+                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on and <b>Icons</b> checked, it comes off every workspace.",
                   "<b>Right-click the empty bar</b> to add an app, plugin, or web link.",
                   "From the empty bar, change <b>icon size, transparency, and the bar color</b>.",
                   "<b>Scroll</b> on the bar to resize icons. Hold <b>Alt and scroll</b> to change transparency.",
                   "A <b>mark</b> under an app means it is open.",
                   "The bar <b>slides away</b> until the pointer reaches the bottom edge.",
-                  "Hold <b>Super and drag this card</b> to move it. It stays where you drop it until you log out.",
+                  "Drag the <b>title</b> or the grip in the upper-left corner to move this menu. Drag the lower-right grip to resize it. The place and size are remembered.",
                   "Hold <b>Super and drag</b> a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom."
                 ]
                 delegate: Item {
@@ -5751,40 +6421,119 @@ Item {
           }
         }
 
-        // Super+left-drag moves the card. Other presses stay with the close
-        // button, the text, and the flickable, so the wheel still scrolls.
-        DragHandler {
-          id: helpDrag
-          acceptedButtons: Qt.LeftButton
-          acceptedModifiers: Qt.MetaModifier
-          grabPermissions: PointerHandler.CanTakeOverFromAnything
-          target: null
-          property real originX: 0
-          property real originY: 0
-          property real startSceneX: 0
-          property real startSceneY: 0
+        Item {
+          id: helpDragGrip
+          z: 6
+          width: Style.space(18)
+          height: width
+          anchors.left: parent.left
+          anchors.top: parent.top
+          anchors.leftMargin: Style.space(2)
+          anchors.topMargin: Style.space(2)
 
-          onActiveChanged: {
-            if (active) {
-              originX = helpCard.x
-              originY = helpCard.y
-              startSceneX = centroid.scenePosition.x
-              startSceneY = centroid.scenePosition.y
+          Column {
+            anchors.centerIn: parent
+            spacing: 2
+            Repeater {
+              model: 3
+              Row {
+                spacing: 2
+                Repeater {
+                  model: 2
+                  Rectangle {
+                    width: 2
+                    height: 2
+                    radius: 1
+                    color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.8)
+                  }
+                }
+              }
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.SizeAllCursor
+            preventStealing: true
+            onPressed: function(mouse) { helpCard.helpDragStart(this, mouse.x, mouse.y) }
+            onPositionChanged: function(mouse) {
+              if (!(mouse.buttons & Qt.LeftButton)) return
+              helpCard.helpDragMove(this, mouse.x, mouse.y)
+            }
+            onReleased: helpCard.helpDragEnd()
+          }
+        }
+
+        Item {
+          id: helpResizeGrip
+          z: 6
+          width: Style.space(28)
+          height: width
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+
+          Canvas {
+            id: helpGripCanvas
+            anchors.fill: parent
+            anchors.margins: Style.space(6)
+            onPaint: {
+              var ctx = getContext("2d")
+              var w = width
+              var h = height
+              ctx.clearRect(0, 0, w, h)
+              ctx.strokeStyle = Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.72)
+              ctx.lineWidth = Math.max(1.5, w * 0.08)
+              ctx.lineCap = "round"
+              var gaps = [0.22, 0.48, 0.74]
+              for (var i = 0; i < gaps.length; i++) {
+                var start = w * gaps[i]
+                ctx.beginPath()
+                ctx.moveTo(start, h - 1)
+                ctx.lineTo(w - 1, start)
+                ctx.stroke()
+              }
+            }
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.SizeFDiagCursor
+            preventStealing: true
+            property real pressX: 0
+            property real pressY: 0
+            property real startW: 0
+            property real startH: 0
+            onPressed: function(mouse) {
+              var p = mapToItem(helpCard.parent, mouse.x, mouse.y)
+              pressX = p.x
+              pressY = p.y
+              startW = helpCard.width
+              startH = helpCard.height
+              helpCard.resizePinX = helpCard.x
+              helpCard.resizePinY = helpCard.y
+              helpCard.resizing = true
               root.helpPosX = helpCard.x
               root.helpPosY = helpCard.y
               root.helpPosSet = true
-              root.helpDragging = true
-            } else if (root.helpDragging) {
-              root.helpDragging = false
-              root.helpPosX = helpCard.x
-              root.helpPosY = helpCard.y
-              root.saveHelpPos(menuWindow.screen ? String(menuWindow.screen.name || "") : "")
+              root.helpWindowW = startW
+              root.helpWindowH = startH
+              root.helpWindowSized = true
             }
-          }
-          onTranslationChanged: {
-            if (!root.helpDragging) return
-            root.helpPosX = originX + (centroid.scenePosition.x - startSceneX)
-            root.helpPosY = originY + (centroid.scenePosition.y - startSceneY)
+            onPositionChanged: function(mouse) {
+              if (!(mouse.buttons & Qt.LeftButton)) return
+              var p = mapToItem(helpCard.parent, mouse.x, mouse.y)
+              var maxW = helpCard.parent.width - helpCard.resizePinX - Style.space(8)
+              var maxH = helpCard.parent.height - helpCard.resizePinY - Style.space(8)
+              root.helpWindowW = Math.min(Math.max(Style.space(280), startW + p.x - pressX), maxW)
+              root.helpWindowH = Math.min(Math.max(Style.space(220), startH + p.y - pressY), maxH)
+            }
+            onReleased: {
+              helpCard.resizing = false
+              helpCard.helpDragEnd()
+            }
           }
         }
       }
