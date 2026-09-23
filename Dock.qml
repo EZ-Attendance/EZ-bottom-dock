@@ -10,10 +10,13 @@ import qs.Ui
 import "DockModel.js" as DockModel
 
 // Auto-hiding bottom dock with left / center / right app icons.
-// Empty layout shows "Right click to start customization". Right-click to add apps or web links.
+// Empty layout shows "Right click to start customization".
 // Right-click an icon, then the info button, for help on what the dock does.
-// Layouts are stored per Hyprland workspace. Each monitor's dock shows the
-// workspace that monitor is displaying, even when the cursor is on another output.
+// Icons, bar edge, size, color, popups, and auto-hide are stored per workspace.
+// The globe at the end of the right section toggles Global Changes for every workspace.
+// Each monitor's dock shows the workspace that monitor is displaying.
+// Auto-hide reveals only the monitor under the pointer, so one workspace's
+// edge hover does not slide the other workspaces' docks into view.
 Item {
   id: root
 
@@ -25,6 +28,8 @@ Item {
 
   property bool autoHide: true
   property bool revealHeld: false
+  // Output name whose dock is allowed to slide in. Other monitors stay hidden.
+  property string revealScreenName: ""
   property int hoverCount: 0
   property bool menuOpen: false
   property bool pickerOpen: false
@@ -37,7 +42,13 @@ Item {
   property var defaultLayout: DockModel.emptyLayout()
   property var workspaceLayouts: ({})
   property var workspaceTouched: ({})
+  property bool globalChanges: false
+  // Per-workspace bar edge, size, color, popups, and auto-hide.
+  // Missing keys use defaultLook, which is what a new workspace inherits.
+  property var workspaceLooks: ({})
+  property var defaultLook: DockModel.defaultLook()
   property string workspaceId: "1"
+  property var hoveredScreen: null
   property int iconSize: DockModel.defaultIconSize()
   property int bgOpacity: DockModel.defaultBgOpacity()
   property string bgColorKey: ""
@@ -46,9 +57,6 @@ Item {
   property bool showTips: true
   property string barEdge: "bottom" // "bottom" | "left" | "right"
   property bool barEdgeDragging: false
-  property bool edgeHoldActive: false
-  property string edgeHoldSide: ""
-  property real edgeHoldLimit: 0
   property real pointerX: 0
   property real pointerY: 0
   property bool pointerKnown: false
@@ -60,6 +68,18 @@ Item {
 
   property var dragItem: null
   property string dropSection: ""
+  property int menuSectionIndex: -1
+  property bool confirmRemoveOpen: false
+  property int confirmSectionIndex: -1
+  property int removeSectionPick: -1
+  property int resizeBoundaryIndex: -1
+  property bool resizeTail: false
+  property bool superDown: false
+  property int resizePreviewTick: 0
+  property int resizeFrozenLead: -1
+  property bool resizeButtonDown: false
+  property real resizeOriginAlong: 0
+  property var resizeBaseLayout: null
   property int dropIndex: 0
   property string dragGhostSource: ""
   property string dragGhostBadge: ""
@@ -73,8 +93,8 @@ Item {
   property var closedAddresses: ({})
   property bool clientSyncAgain: false
 
-  property string pendingSection: "center"
-  property string itemPlaceSection: "center"
+  property int pendingSection: 1
+  property int itemPlaceSection: 1
   property var menuItem: null
   property bool helpOpen: false
   property bool helpPosSet: false
@@ -107,6 +127,8 @@ Item {
 
   property bool tipVisible: false
   property string tipText: ""
+  property var tipItem: null
+  property var tipItemScreen: null
   property real tipX: 0
   property real tipY: 0
   property var tipScreen: null
@@ -114,16 +136,183 @@ Item {
 
   readonly property bool hovered: hoverCount > 0
   readonly property bool uiHeld: menuOpen || pickerOpen || webOpen || dragging || barEdgeDragging
-  readonly property bool forceShown: hovered || revealHeld || uiHeld
-  readonly property bool revealed: !autoHide || forceShown
   readonly property bool layoutEmpty: DockModel.isEmpty(layout)
 
   readonly property int dockHeight: DockModel.dockHeightForIcons(iconSize)
+  // Extra room on each side of the icons when the bar is on the left or right.
+  readonly property int sideInset: Math.round(Style.space(8) * 0.616)
+  readonly property int barCross: dockHeight + sideInset * 2
   readonly property int edgeSize: 4
-  readonly property int hideOffset: dockHeight + 1
-  property int slideOffset: revealed ? 0 : hideOffset
+  readonly property int hideOffset: barCross + 1
+
+  readonly property int endGap: Math.max(0, topBarInsetFile.insetSize)
+
+  FileView {
+    id: topBarInsetFile
+    property bool shown: false
+    property string insetScreen: ""
+    property int insetSize: 0
+    path: {
+      var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+      if (!runtime.length) runtime = "/tmp"
+      return runtime + "/omarchy-top-bar-inset.json"
+    }
+    watchChanges: true
+    printErrors: false
+    onLoaded: applyInsetText()
+    onFileChanged: reload()
+    function applyInsetText() {
+      var raw = ""
+      try { raw = text() } catch (e) { raw = "" }
+      var nextShown = false
+      var nextScreen = ""
+      var nextSize = 0
+      try {
+        var parsed = JSON.parse(raw || "")
+        nextShown = !!parsed.shown
+        nextScreen = String(parsed.screen || "")
+        nextSize = Math.max(0, Math.round(Number(parsed.size) || 0))
+      } catch (e) {}
+      shown = nextShown
+      insetScreen = nextScreen
+      insetSize = nextSize
+    }
+  }
   readonly property int iconSlot: iconSize
+  // Wider than app icons so two or three letters stay clear of the border.
+  readonly property int keybindSlot: iconSlot + Style.space(16)
+  // Gap between the three equal sections.
+  readonly property int groupGap: Math.max(Style.space(20), iconSlot)
+  // Floor so a short group still reads as its own section. The real length
+  // is the fullest group when that is longer than this.
+  readonly property int defaultSectionSpan: iconSlot * 3 + Style.space(4) * 2
+
+  function sectionContentSpan(items, metrics) {
+    var list = items || []
+    var slot = metrics && metrics.iconSlot ? metrics.iconSlot : iconSlot
+    var keybind = metrics && metrics.keybindSlot ? metrics.keybindSlot : keybindSlot
+    if (!list.length)
+      return dragging ? slot : 0
+    var gap = Style.space(4)
+    var total = 0
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i]
+      total += item && String(item.kind || "") === "keybind" ? keybind : slot
+    }
+    if (list.length > 1)
+      total += gap * (list.length - 1)
+    return Math.max(total, dragging ? slot : 0)
+  }
+
+  function displayedSectionSpan(section, metrics) {
+    var slot = metrics && metrics.iconSlot ? metrics.iconSlot : iconSize
+    var keybind = metrics && metrics.keybindSlot ? metrics.keybindSlot : slot + Style.space(16)
+    var iconGap = Style.space(4)
+    var stored = Math.max(0, Math.round(Number(section && section.span) || 0))
+    var items = section && section.items ? section.items : []
+    if (!items.length) return Math.max(stored, slot)
+    var content = 0
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i]
+      content += item && String(item.kind || "") === "keybind" ? keybind : slot
+    }
+    if (items.length > 1) content += iconGap * (items.length - 1)
+    return Math.max(stored, content)
+  }
+
+  function sectionSpanSum(layout, metrics) {
+    var sections = DockModel.sectionsOf(layout)
+    var sum = 0
+    for (var i = 0; i < sections.length; i++)
+      sum += displayedSectionSpan(sections[i], metrics)
+    return sum
+  }
+
+  // Section spans, the gaps between them, and the globe.
+  function barContentAlong(layout, vertical, metrics) {
+    var slot = metrics && metrics.iconSlot ? metrics.iconSlot : iconSlot
+    var gap = metrics && metrics.groupGap ? metrics.groupGap : Math.max(Style.space(20), slot)
+    var endPad = vertical ? Style.space(6) : Style.space(10)
+    var tail = globalToggleSpan(metrics)
+    var count = DockModel.groupCount(layout)
+    if (count <= 0)
+      return tail + endPad * 2
+    var between = Math.max(0, count - 1) * gap
+    return sectionSpanSum(layout, metrics) + between + endPad * 2 + tail
+  }
+
+  // Separator plus globe pinned to the end of the right section.
+  function globalToggleSpan(metrics) {
+    var slot = metrics && metrics.iconSlot ? metrics.iconSlot : iconSlot
+    var rule = Math.max(2, Math.round(Style.space(1)))
+    var gap = Style.space(8)
+    return gap + rule + gap + slot + Style.space(6) + slot
+  }
+
+  function metricsForLook(look) {
+    var size = DockModel.clampIconSize(look && look.iconSize ? look.iconSize : iconSize)
+    var slot = size
+    var keybind = slot + Style.space(16)
+    var height = DockModel.dockHeightForIcons(size)
+    var cross = height + sideInset * 2
+    var edge = DockModel.normalizeEdge(look && look.barEdge ? look.barEdge : barEdge)
+    return {
+      iconSize: size,
+      iconSlot: slot,
+      keybindSlot: keybind,
+      dockHeight: height,
+      barCross: cross,
+      hideOffset: cross + 1,
+      barEdge: edge,
+      groupGap: Math.max(Style.space(20), slot)
+    }
+  }
+
+  // lead/trail are the margins that center a content-sized bar on the screen.
+  // A side bar stays below the top bar. A bottom bar centers on the full width.
+  function panelInsets(screen, layout, look) {
+    var metrics = metricsForLook(look || lookFor(workspaceId))
+    var vertical = metrics.barEdge !== "bottom"
+    var along = barContentAlong(layout, vertical, metrics)
+    var sw = screen ? Number(screen.width) || 0 : 0
+    var sh = screen ? Number(screen.height) || 0 : 0
+    var screenAlong = Math.max(1, vertical ? sh : sw)
+    var available = vertical ? Math.max(metrics.barCross, screenAlong - endGap) : screenAlong
+    var fitted = Math.max(metrics.barCross, Math.min(along, available))
+    var slack = Math.max(0, (vertical ? available : screenAlong) - fitted)
+    var half = Math.floor(slack / 2)
+    return {
+      lead: vertical ? endGap + half : half,
+      trail: slack - half,
+      fitted: fitted
+    }
+  }
   readonly property color ink: Color.bar.text
+  // Selected-window border from the current theme's hyprland.lua.
+  property color activeBorder: Color.accent
+
+  function hyprColorToHex(value) {
+    var s = String(value || "").trim()
+    if (s.charAt(0) === "#") {
+      var body = s.slice(1)
+      if (body.length === 6 || body.length === 8) return "#" + body.slice(0, 6)
+      return ""
+    }
+    var rgb = s.match(/^rgb\(([0-9a-fA-F]{6})\)$/i)
+    if (rgb) return "#" + rgb[1]
+    var rgba = s.match(/^rgba\(([0-9a-fA-F]{8})\)$/i)
+    if (rgba) return "#" + rgba[1].slice(0, 6)
+    return ""
+  }
+
+  function readActiveBorder(raw) {
+    var text = String(raw || "")
+    var simple = text.match(/active_border_color\s*=\s*["']([^"']+)["']/)
+    var gradient = text.match(/active_border_color\s*=\s*\{[\s\S]{0,500}?["']([^"']+)["']/)
+    var token = (simple && simple[1]) || (gradient && gradient[1]) || ""
+    var hex = hyprColorToHex(token)
+    return hex.length ? hex : Color.accent
+  }
   readonly property color surface: Color.popups.background
   readonly property color barFill: {
     var _pal = root.themePalette
@@ -194,15 +383,17 @@ Item {
     }
     return out
   }
+  readonly property var sectionChoices: {
+    var n = DockModel.groupCount(layout)
+    var out = []
+    for (var i = 0; i < n; i++) out.push({ label: String(i + 1), value: i })
+    return out
+  }
   readonly property string pickerTitle: pickerKind === "plugin"
-    ? ("Add plugin → " + pendingSection)
+    ? ("Add plugin → " + (pendingSection + 1))
     : pickerKind === "keybind"
       ? "Keybindings"
-      : ("Add app → " + pendingSection)
-
-  Behavior on slideOffset {
-    NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
-  }
+      : ("Add app → " + (pendingSection + 1))
 
   function open(_payload) {}
   function close() { root.closeMenus() }
@@ -304,27 +495,37 @@ Item {
     var originY = Number(mon.y) || 0
     var w = Number(mon.width) || 0
     var h = Number(mon.height) || 0
-    var edge = edgeFromDrag(barEdge, x0 - originX, y0 - originY, x1 - originX, y1 - originY, w, h)
     var screen = screenNamed(mon.name)
+    var currentEdge = lookFor(workspaceIdForScreen(screen)).barEdge
+    var edge = edgeFromDrag(currentEdge, x0 - originX, y0 - originY, x1 - originX, y1 - originY, w, h)
     if (screen)
       showEdgeHint(screen, x1 - originX, y1 - originY, edge)
     if (commit) {
       barEdgeDragging = false
-      setBarEdge(edge)
+      setBarEdge(edge, screen)
       hideIconTip()
     } else {
       barEdgeDragging = true
-      armReveal()
+      armReveal(screen)
     }
     return edge
   }
 
-  function setBarEdge(edge) {
+  function setBarEdge(edge, screen) {
+    var id = screen ? workspaceIdForScreen(screen) : workspaceId
     var next = edge === "left" || edge === "right" ? edge : "bottom"
-    if (next === barEdge) return
-    barEdge = next
-    edgeHoldActive = false
-    persistSettings()
+    if (!globalChanges && next === lookFor(id).barEdge) return
+    if (globalChanges && next === lookFor(id).barEdge && looksShareEdge(next)) return
+    patchLooks({ barEdge: next }, id)
+  }
+
+  function looksShareEdge(edge) {
+    if (DockModel.normalizeEdge(defaultLook.barEdge) !== edge) return false
+    var ids = knownWorkspaceIds()
+    for (var i = 0; i < ids.length; i++) {
+      if (lookFor(ids[i]).barEdge !== edge) return false
+    }
+    return true
   }
 
   // Map a point inside a dock panel to that screen. The panel only covers the
@@ -336,11 +537,31 @@ Item {
     var sh = screen ? Number(screen.height) || 0 : 0
     var x = Number(sceneX) || 0
     var y = Number(sceneY) || 0
-    if (barEdge === "right")
-      x = sw - (panel ? panel.width : 0) + x
-    else if (barEdge === "bottom")
-      y = sh - (panel ? panel.height : 0) + y
+    var layout = panel && panel.screenLayout ? panel.screenLayout : root.layout
+    var look = panel && panel.screenLook ? panel.screenLook : lookFor(workspaceIdForScreen(screen))
+    var metrics = metricsForLook(look)
+    var insets = panelInsets(screen, layout, look)
+    var cross = metrics.barCross
+    if (metrics.barEdge === "right")
+      x = sw - (panel && panel.width ? panel.width : cross) + x
+    else if (metrics.barEdge === "bottom")
+      x = insets.lead + x
+    if (metrics.barEdge === "bottom")
+      y = sh - (panel && panel.height ? panel.height : cross) + y
+    else
+      y = insets.lead + y
     return { x: x, y: y, w: sw, h: sh }
+  }
+
+  // mapToGlobal on the dock panel is relative to the bar, which no longer
+  // starts at the screen edge. Convert a panel-local point to desktop coords.
+  function globalFromPanel(panel, sceneX, sceneY) {
+    var screen = panel && panel.screen ? panel.screen : null
+    var pt = panelPointToScreen(panel, sceneX, sceneY)
+    return {
+      x: pt.x + (screen ? Number(screen.x) || 0 : 0),
+      y: pt.y + (screen ? Number(screen.y) || 0 : 0)
+    }
   }
 
   // The bar already sits on an edge, so "nearest edge" would keep it there.
@@ -392,8 +613,121 @@ Item {
     webName = ""
     webUrl = ""
     webFocus = "name"
+    confirmRemoveOpen = false
+    confirmSectionIndex = -1
+    removeSectionPick = -1
+    menuSectionIndex = -1
     hideIconTip()
     releaseRevealSoon()
+  }
+
+  function sectionHasIcons(index) {
+    var i = Math.round(Number(index))
+    if (DockModel.sectionLength(layout, i) > 0) return true
+    if (!globalChanges) return false
+    var ids = knownWorkspaceIds()
+    for (var n = 0; n < ids.length; n++) {
+      if (DockModel.sectionLength(layoutForWorkspaceKey(ids[n]), i) > 0) return true
+    }
+    return false
+  }
+
+  function toggleSectionPick(index) {
+    var i = Math.round(Number(index))
+    var n = DockModel.groupCount(layout)
+    if (i < 0 || i >= n) return
+    removeSectionPick = removeSectionPick === i ? -1 : i
+  }
+
+  function dropSection(index) {
+    var i = Math.round(Number(index))
+    removeSectionPick = -1
+    commitLayout(function(current) { return DockModel.removeSection(current, i) })
+  }
+
+  function askRemoveSection(index) {
+    var n = DockModel.groupCount(layout)
+    var i = Math.round(Number(index))
+    if (i < 0 || i >= n) return
+    if (!sectionHasIcons(i)) {
+      confirmRemoveOpen = false
+      confirmSectionIndex = -1
+      dropSection(i)
+      return
+    }
+    confirmSectionIndex = i
+    confirmRemoveOpen = true
+  }
+
+  function cancelRemoveSection() {
+    confirmRemoveOpen = false
+    confirmSectionIndex = -1
+  }
+
+  function commitRemoveSection() {
+    var index = confirmSectionIndex
+    confirmRemoveOpen = false
+    confirmSectionIndex = -1
+    if (index < 0) return
+    dropSection(index)
+    closeMenus()
+  }
+
+  function addUserSection() {
+    if (DockModel.groupCount(layout) >= DockModel.maxSections()) return
+    var span = spanFloor()
+    commitLayout(function(current) {
+      if (DockModel.groupCount(current) >= DockModel.maxSections()) return current
+      return DockModel.addSection(current, span)
+    })
+  }
+
+  function beginSectionResize(panel, index, along) {
+    if (panel && panel.screen) syncWorkspaceForScreen(panel.screen)
+    resizeTail = false
+    resizeBoundaryIndex = Math.round(Number(index))
+    resizeOriginAlong = along
+    resizeBaseLayout = DockModel.cloneLayout(layout)
+    if (resizeFrozenLead < 0 && panel && panel.insets)
+      resizeFrozenLead = panel.insets.lead
+  }
+
+  function beginTailResize(panel, along) {
+    if (panel && panel.screen) syncWorkspaceForScreen(panel.screen)
+    if (DockModel.groupCount(layout) < 1) return
+    resizeTail = true
+    resizeBoundaryIndex = DockModel.groupCount(layout) - 1
+    resizeOriginAlong = along
+    resizeBaseLayout = DockModel.cloneLayout(layout)
+    if (resizeFrozenLead < 0 && panel && panel.insets)
+      resizeFrozenLead = panel.insets.lead
+  }
+
+  function updateSectionResize(panel, along) {
+    if (resizeBoundaryIndex < 0 || !resizeBaseLayout) return
+    var delta = along - resizeOriginAlong
+    var slot = panel && panel.screenIconSlot ? panel.screenIconSlot : iconSlot
+    var keybind = panel && panel.screenKeybindSlot ? panel.screenKeybindSlot : keybindSlot
+    var gap = Style.space(4)
+    var minA = DockModel.sectionMinimum(DockModel.sectionItems(resizeBaseLayout, resizeBoundaryIndex), slot, keybind, gap)
+    var next = DockModel.resizeSection(resizeBaseLayout, resizeBoundaryIndex, delta, minA)
+    // Keep the same section objects while dragging. Replacing the layout
+    // rebuilds the separator under the pointer and the drag dies.
+    var live = layout && layout.sections ? layout.sections : []
+    var preview = next.sections
+    for (var i = 0; i < live.length && i < preview.length; i++)
+      live[i].span = preview[i].span
+    resizePreviewTick = resizePreviewTick + 1
+  }
+
+  function endSectionResize() {
+    if (resizeBoundaryIndex < 0) return
+    var next = DockModel.cloneLayout(layout)
+    resizeBoundaryIndex = -1
+    resizeTail = false
+    resizeBaseLayout = null
+    resizeFrozenLead = -1
+    persistLayout(next)
   }
 
   function ensureMenuScreen() {
@@ -506,19 +840,24 @@ Item {
     tipDelay.stop()
     tipVisible = false
     tipText = ""
+    tipItem = null
+    tipItemScreen = null
     tipScreen = null
   }
 
   function showIconTip(screen, globalX, globalY, text) {
     var label = String(text || "")
-    if (!showTips || !label.length || dragging || menuOpen || pickerOpen || webOpen) {
+    var tipsOn = screen ? lookFor(workspaceIdForScreen(screen)).showTips !== false : showTips
+    if (!tipsOn || !label.length || dragging || menuOpen || pickerOpen || webOpen) {
       hideIconTip()
       return
     }
+    tipItem = null
+    tipItemScreen = null
     tipText = label
     tipScreen = screen
-    // Screen-local coords for the tip panel; sit above the dock, right of cursor.
-    tipX = globalX - (screen ? screen.x : 0) + Style.space(12)
+    // Screen-local cursor. The tip card centers on this point.
+    tipX = globalX - (screen ? screen.x : 0)
     tipY = globalY - (screen ? screen.y : 0)
     if (tipVisible)
       return
@@ -528,24 +867,35 @@ Item {
   function refreshIconTipPosition(screen, globalX, globalY) {
     if (!tipVisible && !tipDelay.running) return
     if (screen) tipScreen = screen
-    tipX = globalX - (screen ? screen.x : 0) + Style.space(12)
+    tipX = globalX - (screen ? screen.x : 0)
     tipY = globalY - (screen ? screen.y : 0)
   }
 
-  function setHovered(hovered) {
+  function screenNameOf(screen) {
+    return screen ? String(screen.name || "") : ""
+  }
+
+  function setHovered(hovered, screen) {
     hoverCount = Math.max(0, hoverCount + (hovered ? 1 : -1))
+    if (hovered && screen) {
+      revealScreenName = screenNameOf(screen)
+      hoveredScreen = screen
+    }
     if (hoverCount === 0) {
       if (cursorKeepsBar())
         armReveal()
       else
         hideTimer.restart()
-    } else {
+    } else if (hovered) {
       hideTimer.stop()
       revealHeld = true
     }
   }
 
-  function armReveal() {
+  function armReveal(screen) {
+    var name = screenNameOf(screen)
+    if (name.length)
+      revealScreenName = name
     hideTimer.stop()
     revealHeld = true
   }
@@ -559,60 +909,115 @@ Item {
       hideTimer.restart()
   }
 
-  function hyprMonitorByName(name) {
-    var want = String(name || "")
-    if (!want.length) return null
+  // True only for the output that was hovered. A menu or drag keeps that
+  // output's dock up; every other workspace stays slid away.
+  function screenRevealed(screen) {
+    return screenRevealedName(screenNameOf(screen))
+  }
+
+  function autoHideActive() {
+    var ids = knownWorkspaceIds()
+    for (var i = 0; i < ids.length; i++) {
+      if (lookFor(ids[i]).autoHide) return true
+    }
+    return !!(defaultLook && defaultLook.autoHide)
+  }
+
+  function screenRevealedName(name) {
+    var output = String(name || "")
+    if (output.length && !lookFor(workspaceIdForOutput(output)).autoHide) return true
+    if (!output.length && !autoHide) return true
+    if (!output.length) return false
+    if (uiHeld) {
+      var pinned = screenNameOf(menuScreen)
+      if (!pinned.length) pinned = revealScreenName
+      return pinned === output
+    }
+    if (!(revealHeld || hovered)) return false
+    return revealScreenName === output
+  }
+
+  function hyprMonitors() {
     var mons = []
     try { mons = (Hyprland.monitors && Hyprland.monitors.values) ? Hyprland.monitors.values : [] } catch (e) { mons = [] }
+    return mons
+  }
+
+  // Which output's outer edge contains this global pointer. Bottom edges share
+  // a Y, so the match has to include that output's X range. Sliding off the
+  // outer edge still counts; crossing onto another output does not.
+  function pointerEdgeScreenName(x, y) {
+    var mons = hyprMonitors()
+    var offName = ""
+    var offDist = 1e12
+    var insideAny = false
     for (var i = 0; i < mons.length; i++) {
-      if (mons[i] && String(mons[i].name || "") === want)
-        return mons[i]
+      var mon = mons[i]
+      if (!mon) continue
+      var mx = Number(mon.x) || 0
+      var my = Number(mon.y) || 0
+      var mw = Number(mon.width) || 0
+      var mh = Number(mon.height) || 0
+      var name = String(mon.name || "")
+      if (!name.length || mw < 1 || mh < 1) continue
+      var look = lookFor(monWorkspaceId(mon))
+      var metrics = metricsForLook(look)
+      var edge = metrics.barEdge
+      var cross = metrics.barCross
+      var insideX = x >= mx && x < mx + mw
+      var insideY = y >= my && y < my + mh
+      if (insideX && insideY) insideAny = true
+      if (edge === "left") {
+        if (insideY && x >= mx && x <= mx + cross)
+          return name
+        if (insideY && x < mx) {
+          var dl = mx - x
+          if (dl < offDist) { offDist = dl; offName = name }
+        }
+      } else if (edge === "right") {
+        if (insideY && x >= mx + mw - cross && x < mx + mw)
+          return name
+        if (insideY && x >= mx + mw) {
+          var dr = x - (mx + mw)
+          if (dr < offDist) { offDist = dr; offName = name }
+        }
+      } else if (insideX && y >= my + mh - cross) {
+        return name
+      }
     }
-    return null
+    if (!insideAny && offName.length) {
+      var offMon = null
+      var mons2 = hyprMonitors()
+      for (var j = 0; j < mons2.length; j++) {
+        if (mons2[j] && String(mons2[j].name || "") === offName) offMon = mons2[j]
+      }
+      if (offMon && lookFor(monWorkspaceId(offMon)).barEdge !== "bottom")
+        return offName
+    }
+    return ""
+  }
+
+  function monWorkspaceId(mon) {
+    var ws = mon ? mon.activeWorkspace : null
+    if (ws && ws.id !== undefined && ws.id !== null)
+      return DockModel.workspaceKey(ws.id)
+    return workspaceId
   }
 
   // Remember the screen whose edge was just shown. The pointer can slide off
   // that screen, past the bar, and the bar should stay out until the pointer
   // comes back onto the screen on the inner side of the bar.
   function noteEdgeHold(screen) {
-    var mon = hyprMonitorByName(screen ? screen.name : "")
-    var x = 0
-    var y = 0
-    var w = 0
-    var h = 0
-    if (mon) {
-      x = Number(mon.x) || 0
-      y = Number(mon.y) || 0
-      w = Number(mon.width) || 0
-      h = Number(mon.height) || 0
-    } else if (screen) {
-      x = Number(screen.x) || 0
-      y = Number(screen.y) || 0
-      w = Number(screen.width) || 0
-      h = Number(screen.height) || 0
-    } else {
-      return
-    }
-    edgeHoldSide = barEdge
-    if (barEdge === "left")
-      edgeHoldLimit = x + dockHeight
-    else if (barEdge === "right")
-      edgeHoldLimit = x + w - dockHeight
-    else
-      edgeHoldLimit = y + h - dockHeight
-    edgeHoldActive = true
+    var name = screenNameOf(screen)
+    if (!name.length) return
+    revealScreenName = name
     if (!pointerProc.running)
       pointerProc.running = true
   }
 
   function cursorKeepsBar() {
-    if (!pointerKnown || !edgeHoldActive || edgeHoldSide !== barEdge)
-      return false
-    if (barEdge === "left")
-      return pointerX <= edgeHoldLimit
-    if (barEdge === "right")
-      return pointerX >= edgeHoldLimit
-    return pointerY >= edgeHoldLimit
+    if (!pointerKnown || !revealScreenName.length) return false
+    return pointerEdgeScreenName(pointerX, pointerY) === revealScreenName
   }
 
   function notePointer(x, y) {
@@ -620,10 +1025,93 @@ Item {
     pointerX = x
     pointerY = y
     pointerKnown = true
-    if (cursorKeepsBar())
+    if (!(revealHeld || hovered)) return
+    if (menuOpen || pickerOpen || webOpen) return
+    // Stay on the workspace that was hovered. Crossing onto another output's
+    // edge does not reveal that output; its own edge hover does.
+    if (cursorKeepsBar()) {
       armReveal()
-    else if (wasKeeping && revealHeld && !hovered && !uiHeld)
+      return
+    }
+    if (wasKeeping && revealHeld && !hovered && !uiHeld)
       hideTimer.restart()
+  }
+
+  function lookFor(id) {
+    return DockModel.lookForWorkspace(workspaceLooks, id, defaultLook)
+  }
+
+  function fillForLook(look) {
+    var src = look || lookFor(workspaceId)
+    var hex = DockModel.resolveThemeColor(themePalette, src.bgColorKey, src.bgColorHex)
+    if (hex && String(hex).charAt(0) === "#")
+      return hex
+    return surface
+  }
+
+  function knownWorkspaceIds() {
+    var seen = {}
+    var out = []
+    function add(id) {
+      var key = DockModel.workspaceKey(id)
+      if (!key.length || seen[key]) return
+      seen[key] = true
+      out.push(key)
+    }
+    var listed = listedWorkspaceIds || []
+    for (var i = 0; i < listed.length; i++) add(listed[i])
+    add(workspaceId)
+    var maps = workspaceLayouts || {}
+    for (var layoutKey in maps) {
+      if (Object.prototype.hasOwnProperty.call(maps, layoutKey)) add(layoutKey)
+    }
+    var looks = workspaceLooks || {}
+    for (var lookKey in looks) {
+      if (Object.prototype.hasOwnProperty.call(looks, lookKey)) add(lookKey)
+    }
+    return out
+  }
+
+  function activeLook() {
+    return {
+      barEdge: barEdge,
+      iconSize: iconSize,
+      bgOpacity: bgOpacity,
+      bgColorKey: bgColorKey,
+      bgColorHex: bgColorHex,
+      showTips: showTips,
+      autoHide: autoHide
+    }
+  }
+
+  function applyActiveLook(look) {
+    var next = DockModel.cloneLook(look, defaultLook)
+    barEdge = next.barEdge
+    iconSize = next.iconSize
+    bgOpacity = next.bgOpacity
+    bgColorKey = next.bgColorKey
+    bgColorHex = next.bgColorHex
+    showTips = next.showTips
+    autoHide = next.autoHide
+  }
+
+  // patch is absolute values. Global Changes writes them onto every workspace
+  // and the shared default. Otherwise only the workspace being edited changes.
+  function patchLooks(patch, id) {
+    var key = DockModel.workspaceKey(id || workspaceId)
+    if (globalChanges) {
+      var ids = knownWorkspaceIds()
+      var baseDefault = defaultLook
+      workspaceLooks = DockModel.applyLookPatch(workspaceLooks, ids, patch, baseDefault)
+      defaultLook = DockModel.patchLook(baseDefault, patch)
+      applyActiveLook(lookFor(workspaceId))
+    } else {
+      var local = DockModel.patchLook(lookFor(key), patch)
+      workspaceLooks = DockModel.setWorkspaceLook(workspaceLooks, key, local)
+      if (key === DockModel.workspaceKey(workspaceId))
+        applyActiveLook(local)
+    }
+    persistSettings()
   }
 
   function persistSettings() {
@@ -634,16 +1122,20 @@ Item {
     if (!DockModel.isEmpty(layout) && DockModel.isEmpty(defaultLayout))
       defaultLayout = DockModel.cloneLayout(layout)
     if (shell && typeof shell.updateEntryInline === "function") {
+      var shared = DockModel.cloneLook(defaultLook)
       var payload = {
         layout: DockModel.isEmpty(layout) ? DockModel.cloneLayout(defaultLayout) : DockModel.cloneLayout(layout),
         defaultLayout: DockModel.cloneLayout(defaultLayout),
         workspaces: DockModel.pruneEmptyWorkspaceLayouts(workspaceLayouts, defaultLayout),
-        iconSize: iconSize,
-        bgOpacity: bgOpacity,
-        bgColorKey: bgColorKey,
-        bgColorHex: bgColorHex,
-        showTips: showTips,
-        barEdge: barEdge === "left" || barEdge === "right" ? barEdge : "bottom"
+        iconSize: shared.iconSize,
+        bgOpacity: shared.bgOpacity,
+        bgColorKey: shared.bgColorKey,
+        bgColorHex: shared.bgColorHex,
+        showTips: shared.showTips,
+        autoHide: shared.autoHide,
+        barEdge: shared.barEdge,
+        globalChanges: !!globalChanges,
+        workspaceLooks: DockModel.cloneLookMap(workspaceLooks)
       }
       try { payload = JSON.parse(JSON.stringify(payload)) } catch (e) {}
       shell.updateEntryInline(pluginId, payload)
@@ -651,12 +1143,43 @@ Item {
   }
 
   function persistLayout(next) {
-    layout = DockModel.cloneLayout(next)
+    layout = materializeLayout(DockModel.cloneLayout(next))
     var key = DockModel.workspaceKey(workspaceId)
     var touched = Object.assign({}, workspaceTouched)
     touched[key] = true
     workspaceTouched = touched
     workspaceLayouts = DockModel.setWorkspaceLayout(workspaceLayouts, key, layout)
+    persistSettings()
+  }
+
+  // mutator(layout) -> layout. Global Changes replays it on every workspace.
+  function commitLayout(mutator) {
+    if (typeof mutator !== "function") return
+    if (!globalChanges) {
+      persistLayout(mutator(DockModel.cloneLayout(layout)))
+      return
+    }
+    var ids = knownWorkspaceIds()
+    var currentKey = DockModel.workspaceKey(workspaceId)
+    var maps = DockModel.cloneWorkspaceMap(workspaceLayouts)
+    var nextDefault = mutator(DockModel.cloneLayout(defaultLayout))
+    for (var i = 0; i < ids.length; i++) {
+      var key = DockModel.workspaceKey(ids[i])
+      var base = key === currentKey
+        ? layout
+        : (Object.prototype.hasOwnProperty.call(maps, key) ? maps[key] : defaultLayout)
+      maps[key] = mutator(DockModel.cloneLayout(base))
+    }
+    if (!Object.prototype.hasOwnProperty.call(maps, currentKey))
+      maps[currentKey] = mutator(DockModel.cloneLayout(layout))
+    layout = DockModel.cloneLayout(maps[currentKey])
+    defaultLayout = DockModel.cloneLayout(nextDefault)
+    workspaceLayouts = maps
+    var touched = Object.assign({}, workspaceTouched)
+    for (var j = 0; j < ids.length; j++)
+      touched[DockModel.workspaceKey(ids[j])] = true
+    touched[currentKey] = true
+    workspaceTouched = touched
     persistSettings()
   }
 
@@ -673,11 +1196,21 @@ Item {
     return !!DockModel.findItem(layoutForWorkspaceKey(id), itemId)
   }
 
+  function spanFloor() {
+    return DockModel.floorSpan(iconSize, Style.space(4))
+  }
+
+  function materializeLayout(next) {
+    return DockModel.assignMissingSpans(next, iconSize, iconSize + Style.space(16), Style.space(4))
+  }
+
   function setItemPlaceSection(section) {
-    var key = section === "left" || section === "right" ? section : "center"
+    var key = DockModel.sectionIndex(section)
     itemPlaceSection = key
     if (!menuItem) return
-    persistLayout(DockModel.moveItem(layout, menuItem.id, key))
+    var copy = DockModel.cloneItem(menuItem)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, key, copy, span) })
   }
 
   function setItemOnWorkspace(item, id, enabled) {
@@ -686,8 +1219,11 @@ Item {
     var copy = DockModel.cloneItem(item)
     if (!copy) return
     var current = DockModel.cloneLayout(layoutForWorkspaceKey(key))
+    var span = spanFloor()
     var next = enabled
-      ? DockModel.addItem(current, itemPlaceSection, copy)
+      ? (globalChanges
+        ? DockModel.addItemGrowing(current, itemPlaceSection, copy, span)
+        : DockModel.addItemClamped(current, itemPlaceSection, copy, span))
       : DockModel.removeItem(current, copy.id)
     if (key === DockModel.workspaceKey(workspaceId)) {
       persistLayout(next)
@@ -713,6 +1249,10 @@ Item {
   // Workspace currently shown on a given Quickshell screen (the monitor's
   // active workspace), not Hyprland.focusedWorkspace. Cursor focus can move
   // to another output while this monitor keeps its workspace.
+  function workspaceIdForOutput(name) {
+    return workspaceIdForScreen(screenNamed(name))
+  }
+
   function workspaceIdForScreen(screen) {
     var _focus = Hyprland.focusedWorkspace
     var name = screen ? String(screen.name || "") : ""
@@ -749,6 +1289,7 @@ Item {
       layout = DockModel.cloneLayout(workspaceLayouts[nextId])
     else
       layout = DockModel.cloneLayout(defaultLayout)
+    applyActiveLook(lookFor(nextId))
   }
 
   function syncWorkspaceFromHyprland() {
@@ -764,20 +1305,48 @@ Item {
       persistSettings()
   }
 
-  function bumpIconSize(delta) {
-    iconSize = DockModel.clampIconSize(iconSize + delta)
-    persistSettings()
+  function scaleSpansForSize(id, oldSize, newSize) {
+    if (!(oldSize > 0) || !(newSize > 0) || oldSize === newSize) return
+    var ratio = newSize / oldSize
+    if (globalChanges) {
+      var ids = knownWorkspaceIds()
+      var maps = DockModel.cloneWorkspaceMap(workspaceLayouts)
+      for (var i = 0; i < ids.length; i++) {
+        var ws = DockModel.workspaceKey(ids[i])
+        var base = ws === DockModel.workspaceKey(workspaceId) ? layout : (maps[ws] || defaultLayout)
+        maps[ws] = DockModel.scaleSpans(base, ratio)
+      }
+      defaultLayout = DockModel.scaleSpans(defaultLayout, ratio)
+      var currentKey = DockModel.workspaceKey(workspaceId)
+      if (maps[currentKey]) layout = DockModel.cloneLayout(maps[currentKey])
+      workspaceLayouts = maps
+    } else {
+      var localKey = DockModel.workspaceKey(id || workspaceId)
+      var local = DockModel.scaleSpans(layoutForWorkspaceKey(localKey), ratio)
+      if (localKey === DockModel.workspaceKey(workspaceId)) layout = local
+      workspaceLayouts = DockModel.setWorkspaceLayout(workspaceLayouts, localKey, local)
+    }
   }
 
-  function bumpBgOpacity(delta) {
-    bgOpacity = DockModel.clampBgOpacity(bgOpacity + delta)
-    persistSettings()
+  function bumpIconSize(delta, id) {
+    var key = DockModel.workspaceKey(id || workspaceId)
+    var base = lookFor(key).iconSize
+    var next = DockModel.clampIconSize(base + delta)
+    scaleSpansForSize(key, base, next)
+    patchLooks({ iconSize: next }, key)
+  }
+
+  function bumpBgOpacity(delta, id) {
+    var key = DockModel.workspaceKey(id || workspaceId)
+    var base = lookFor(key).bgOpacity
+    patchLooks({ bgOpacity: DockModel.clampBgOpacity(base + delta) }, key)
   }
 
   function setBarBackground(key, hex) {
-    bgColorKey = String(key || "")
-    bgColorHex = String(hex || "")
-    persistSettings()
+    patchLooks({
+      bgColorKey: String(key || ""),
+      bgColorHex: String(hex || "")
+    })
   }
 
   function beginLabelEdit() {
@@ -821,7 +1390,8 @@ Item {
     if (labelEditTarget === "badge") {
       var mark = String(labelDraft || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 3)
       if (mark.length && mark !== String(menuItem.badge || "").toUpperCase()) {
-        persistLayout(DockModel.setItemBadge(layout, menuItem.id, mark))
+        var badgeId = menuItem.id
+        commitLayout(function(current) { return DockModel.setItemBadge(current, badgeId, mark) })
         var marked = DockModel.findItem(layout, menuItem.id)
         if (marked)
           menuItem = marked
@@ -839,7 +1409,8 @@ Item {
       return
     }
     if (name !== DockModel.itemLabel(menuItem)) {
-      persistLayout(DockModel.renameItem(layout, menuItem.id, name))
+      var renameId = menuItem.id
+      commitLayout(function(current) { return DockModel.renameItem(current, renameId, name) })
       var found = DockModel.findItem(layout, menuItem.id)
       if (found)
         menuItem = found
@@ -850,52 +1421,70 @@ Item {
   }
 
   function setShowTips(enabled) {
-    showTips = !!enabled
-    if (!showTips) hideIconTip()
-    persistSettings()
+    if (!enabled) hideIconTip()
+    patchLooks({ showTips: !!enabled })
   }
 
   function toggleShowTips() {
-    setShowTips(!showTips)
+    setShowTips(!lookFor(workspaceId).showTips)
   }
 
-  function handleDockWheel(wheel) {
+  function setAutoHide(enabled) {
+    patchLooks({ autoHide: !!enabled })
+  }
+
+  function toggleAutoHide() {
+    setAutoHide(!lookFor(workspaceId).autoHide)
+  }
+
+  function toggleGlobalChanges() {
+    globalChanges = !globalChanges
+    persistSettings()
+  }
+
+  function handleDockWheel(wheel, id) {
     if (!wheel) return
+    var key = id ? DockModel.workspaceKey(id) : workspaceId
     var mods = wheel.modifiers
     // Alt+wheel → background opacity (also accept Meta/Alt combos that still include Alt).
     if (mods & Qt.AltModifier) {
-      if (wheel.angleDelta.y > 0) bumpBgOpacity(5)
-      else if (wheel.angleDelta.y < 0) bumpBgOpacity(-5)
+      if (wheel.angleDelta.y > 0) bumpBgOpacity(5, key)
+      else if (wheel.angleDelta.y < 0) bumpBgOpacity(-5, key)
       wheel.accepted = true
       return
     }
-    if (wheel.angleDelta.y > 0) bumpIconSize(2)
-    else if (wheel.angleDelta.y < 0) bumpIconSize(-2)
+    if (wheel.angleDelta.y > 0) bumpIconSize(2, key)
+    else if (wheel.angleDelta.y < 0) bumpIconSize(-2, key)
     wheel.accepted = true
   }
 
   // Super+Plus / Super+Minus (via Hyprland binds → IPC) only when cursor is on the dock.
+  function hoveredWorkspaceId() {
+    if (hoveredScreen) return workspaceIdForScreen(hoveredScreen)
+    return workspaceId
+  }
+
   function iconsLargerFromHotkey() {
     if (!hovered) return "ignored"
-    bumpIconSize(4)
+    bumpIconSize(4, hoveredWorkspaceId())
     return "ok"
   }
 
   function iconsSmallerFromHotkey() {
     if (!hovered) return "ignored"
-    bumpIconSize(-4)
+    bumpIconSize(-4, hoveredWorkspaceId())
     return "ok"
   }
 
   function opacityUpFromHotkey() {
     if (!hovered) return "ignored"
-    bumpBgOpacity(5)
+    bumpBgOpacity(5, hoveredWorkspaceId())
     return "ok"
   }
 
   function opacityDownFromHotkey() {
     if (!hovered) return "ignored"
-    bumpBgOpacity(-5)
+    bumpBgOpacity(-5, hoveredWorkspaceId())
     return "ok"
   }
 
@@ -910,12 +1499,14 @@ Item {
     dropIndex = 0
     dragGhostSource = item.kind === "keybind" ? "" : iconSource(item.icon)
     dragGhostBadge = item.kind === "keybind" ? String(item.badge || "").slice(0, 3) : ""
-    armReveal()
+    armReveal(screen)
   }
 
   function updateIconDragGhost(chromeX, chromeY) {
-    dragGhostX = chromeX - iconSlot / 2
-    dragGhostY = chromeY - iconSlot / 2
+    var ghostW = dragGhostBadge.length && barEdge === "bottom" ? keybindSlot : iconSlot
+    var ghostH = dragGhostBadge.length && barEdge !== "bottom" ? keybindSlot : iconSlot
+    dragGhostX = chromeX - ghostW / 2
+    dragGhostY = chromeY - ghostH / 2
   }
 
   function setIconDropTarget(section, index) {
@@ -924,8 +1515,16 @@ Item {
   }
 
   function commitIconDrag() {
-    if (dragging && dragItem && dropSection)
-      persistLayout(DockModel.moveItemAt(layout, dragItem.id, dropSection, dropIndex))
+    if (dragging && dragItem && dropSection) {
+      var itemId = dragItem.id
+      var section = dropSection
+      var index = dropIndex
+      var copy = DockModel.cloneItem(dragItem)
+      var span = spanFloor()
+      commitLayout(function(current) {
+        return DockModel.moveItemAtGrowing(current, itemId, section, index, span, copy)
+      })
+    }
     cancelIconDrag()
   }
 
@@ -967,17 +1566,38 @@ Item {
     }
     workspaceTouched = touched
 
-    var nextIcon = cfg.iconSize > 0 ? cfg.iconSize : DockModel.defaultIconSize()
-    iconSize = DockModel.clampIconSize(nextIcon)
-    bgOpacity = cfg.bgOpacity >= 0
-      ? DockModel.clampBgOpacity(cfg.bgOpacity)
-      : DockModel.defaultBgOpacity()
-    bgColorKey = String(cfg.bgColorKey || "")
-    bgColorHex = String(cfg.bgColorHex || "")
-    showTips = cfg.showTips !== false
-    barEdge = cfg.barEdge === "left" || cfg.barEdge === "right" ? cfg.barEdge : "bottom"
+    globalChanges = cfg.globalChanges === true
+    defaultLook = DockModel.cloneLook({
+      barEdge: cfg.barEdge,
+      iconSize: cfg.iconSize > 0 ? cfg.iconSize : DockModel.defaultIconSize(),
+      bgOpacity: cfg.bgOpacity >= 0 ? cfg.bgOpacity : DockModel.defaultBgOpacity(),
+      bgColorKey: cfg.bgColorKey,
+      bgColorHex: cfg.bgColorHex,
+      showTips: cfg.showTips !== false,
+      autoHide: cfg.autoHide !== false
+    })
+    workspaceLooks = DockModel.cloneLookMap(cfg.workspaceLooks)
+    applyActiveLook(lookFor(workspaceId))
+    materializeAllLayouts()
     _loadingConfig = false
     persistSettings()
+  }
+
+  function materializeAllLayouts() {
+    var slot = iconSize
+    var keybind = iconSize + Style.space(16)
+    var gap = Style.space(4)
+    defaultLayout = DockModel.assignMissingSpans(defaultLayout, slot, keybind, gap)
+    var maps = DockModel.cloneWorkspaceMap(workspaceLayouts)
+    for (var key in maps) {
+      if (!Object.prototype.hasOwnProperty.call(maps, key)) continue
+      maps[key] = DockModel.assignMissingSpans(maps[key], slot, keybind, gap)
+    }
+    workspaceLayouts = maps
+    if (Object.prototype.hasOwnProperty.call(workspaceLayouts, DockModel.workspaceKey(workspaceId)))
+      layout = DockModel.cloneLayout(workspaceLayouts[DockModel.workspaceKey(workspaceId)])
+    else
+      layout = DockModel.cloneLayout(defaultLayout)
   }
 
   function emptySeed(cfg, maps) {
@@ -1222,10 +1842,47 @@ Item {
   }
 
   function itemIsRunning(item, screen, _gen) {
-    var ws = workspaceIdForScreen(screen)
-    if (item && String(item.kind || "") === "keybind" && liveClientGen)
-      return !!findKeybindClient(item, ws)
-    return !!findToplevelForItem(item, ws)
+    return itemRunningCount(item, screen, _gen) > 0
+  }
+
+  // Windows of this icon on the workspace that screen is showing.
+  function itemRunningCount(item, screen, _gen) {
+    var _rev = toplevelRevision
+    var _live = liveClientGen
+    if (!item) return 0
+    var ws = String(workspaceIdForScreen(screen) || "")
+    if (String(item.kind || "") === "keybind") {
+      if (!_live) return 0
+      var rows = liveClients || []
+      var keys = 0
+      for (var i = 0; i < rows.length; i++) {
+        var client = rows[i]
+        if (!client) continue
+        if (ws.length && String(client.workspaceId || "") !== ws) continue
+        if (DockModel.keybindMatchesClass(item, client.className)
+            || DockModel.keybindMatchesClass(item, client.initialClass))
+          keys++
+      }
+      return keys
+    }
+    var values = hyprToplevels()
+    var count = 0
+    for (var j = 0; j < values.length; j++) {
+      var raw = values[j]
+      if (!raw) continue
+      if (ws.length && toplevelWorkspaceId(raw) !== ws) continue
+      if (!windowMatchesItem(item, toplevelView(raw))) continue
+      count++
+    }
+    return count
+  }
+
+  function showItemIconTip(screen, globalX, globalY, item) {
+    showIconTip(screen, globalX, globalY, DockModel.itemLabel(item))
+    if (tipText === DockModel.itemLabel(item)) {
+      tipItem = item
+      tipItemScreen = screen
+    }
   }
 
   function itemIsFocused(item, screen, _gen) {
@@ -1284,10 +1941,12 @@ Item {
     menuOpen = true
     pickerOpen = false
     webOpen = false
-    armReveal()
+    armReveal(screen)
   }
 
   function openItemMenu(screen, item, globalX, globalY) {
+    menuSectionIndex = -1
+    confirmRemoveOpen = false
     syncWorkspaceForScreen(screen)
     helpOpen = false
     menuItem = item
@@ -1297,15 +1956,15 @@ Item {
     menuX = globalX - (screen ? screen.x : 0)
     menuY = globalY - (screen ? screen.y : 0)
     var loc = DockModel.findItemLocation(layout, item ? item.id : "")
-    itemPlaceSection = loc && loc.section ? loc.section : "center"
+    itemPlaceSection = loc ? DockModel.sectionIndex(loc.section) : 0
     menuOpen = true
     pickerOpen = false
     webOpen = false
-    armReveal()
+    armReveal(screen)
   }
 
   function beginAdd(section) {
-    pendingSection = section
+    pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
     pickerKind = "app"
     menuOpen = false
     pickerQuery = ""
@@ -1313,11 +1972,11 @@ Item {
     ensureMenuScreen()
     pickerOpen = true
     webOpen = false
-    armReveal()
+    armReveal(menuScreen)
   }
 
   function beginAddPlugin(section) {
-    pendingSection = section
+    pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
     pickerKind = "plugin"
     menuOpen = false
     pickerQuery = ""
@@ -1326,11 +1985,11 @@ Item {
     pickerOpen = true
     webOpen = false
     refreshPluginCatalog()
-    armReveal()
+    armReveal(menuScreen)
   }
 
   function beginKeybindAdd(section) {
-    pendingSection = section || "center"
+    pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
     pickerKind = "keybind"
     menuOpen = false
     pickerQuery = ""
@@ -1339,11 +1998,11 @@ Item {
     pickerOpen = true
     webOpen = false
     refreshKeybinds()
-    armReveal()
+    armReveal(menuScreen)
   }
 
   function beginWebAdd(section) {
-    pendingSection = section || "center"
+    pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
     menuOpen = false
     pickerOpen = false
     webName = ""
@@ -1351,24 +2010,33 @@ Item {
     webFocus = "name"
     ensureMenuScreen()
     webOpen = true
-    armReveal()
+    armReveal(menuScreen)
   }
 
   function acceptApp(entry) {
     if (!entry) return
-    persistLayout(DockModel.addItem(layout, pendingSection, DockModel.makeAppItem(entry)))
+    var section = pendingSection
+    var item = DockModel.makeAppItem(entry)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
     closeMenus()
   }
 
   function acceptPlugin(plugin) {
     if (!plugin) return
-    persistLayout(DockModel.addItem(layout, pendingSection, DockModel.makePluginItem(plugin)))
+    var section = pendingSection
+    var item = DockModel.makePluginItem(plugin)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
     closeMenus()
   }
 
   function acceptKeybind(row) {
     if (!row) return
-    persistLayout(DockModel.addItem(layout, pendingSection, DockModel.makeKeybindItem(row, layout)))
+    var section = pendingSection
+    var item = DockModel.makeKeybindItem(row, layout)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
     closeMenus()
   }
 
@@ -1385,7 +2053,10 @@ Item {
     if (!name && url)
       name = url.replace(/^https?:\/\//i, "").replace(/\/.*$/, "")
     if (!name || !url || url === "https://") return
-    persistLayout(DockModel.addItem(layout, pendingSection, DockModel.makeWebItem(name, url)))
+    var section = pendingSection
+    var item = DockModel.makeWebItem(name, url)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) })
     closeMenus()
   }
 
@@ -1483,6 +2154,7 @@ Item {
   }
 
   Component.onCompleted: {
+    console.log("bottom-dock loaded search-v3")
     root.refreshPluginCatalog()
     root.refreshBackgroundPalette()
     root.requestClientSync()
@@ -1525,7 +2197,7 @@ Item {
     repeat: true
     running: true
     onTriggered: {
-      if (root.autoHide && !pointerProc.running)
+      if (root.autoHideActive() && !pointerProc.running)
         pointerProc.running = true
     }
   }
@@ -1581,6 +2253,15 @@ Item {
   }
 
   FileView {
+    id: activeBorderFile
+    path: Color.currentThemePath + "/hyprland.lua"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.activeBorder = root.readActiveBorder(text())
+    onFileChanged: reload()
+  }
+
+  FileView {
     id: themeColorsFile
     path: Color.currentThemePath + "/colors.toml"
     watchChanges: true
@@ -1603,11 +2284,15 @@ Item {
       root.defaultLayout = DockModel.emptyLayout()
       root.workspaceLayouts = ({})
       root.workspaceTouched = ({})
+      root.globalChanges = false
+      root.workspaceLooks = ({})
+      root.defaultLook = DockModel.defaultLook()
       root.iconSize = DockModel.defaultIconSize()
       root.bgOpacity = DockModel.defaultBgOpacity()
       root.bgColorKey = ""
       root.bgColorHex = ""
       root.showTips = true
+      root.autoHide = true
       root.barEdge = "bottom"
     }
   }
@@ -1617,7 +2302,7 @@ Item {
     focusedWorkspace && focusedWorkspace.id !== undefined ? focusedWorkspace.id : 1)
 
   onFocusedWorkspaceKeyChanged: {
-    if (_loadingConfig) return
+    if (_loadingConfig || menuOpen || pickerOpen || webOpen) return
     root.syncWorkspaceFromHyprland()
   }
 
@@ -1691,25 +2376,31 @@ Item {
           var wsKey = ws && ws.id !== undefined && ws.id !== null
             ? DockModel.workspaceKey(ws.id) : ""
           var shown = root.layoutForWorkspaceKey(wsKey || root.workspaceId)
+          var monLook = root.lookFor(wsKey || root.workspaceId)
           monitors.push({
             name: String(m && m.name ? m.name : ""),
             focused: !!(m && m.focused),
             workspaceId: String(wsKey),
-            left: shown && shown.left ? shown.left.length : 0,
-            center: shown && shown.center ? shown.center.length : 0,
-            right: shown && shown.right ? shown.right.length : 0
+            barEdge: String(monLook.barEdge || "bottom"),
+            sections: DockModel.groupCount(shown),
+            left: DockModel.sectionLength(shown, 0),
+            center: DockModel.sectionLength(shown, 1),
+            right: DockModel.sectionLength(shown, 2)
           })
         }
       } catch (e) {
       }
       return JSON.stringify({
         workspaceId: String(root.workspaceId),
+        globalChanges: !!root.globalChanges,
+        barEdge: String(root.barEdge || "bottom"),
         focusedKey: String(root.focusedWorkspaceKey),
         keys: keys,
         monitors: monitors,
-        left: root.layout.left ? root.layout.left.length : 0,
-        center: root.layout.center ? root.layout.center.length : 0,
-        right: root.layout.right ? root.layout.right.length : 0,
+        sections: DockModel.groupCount(root.layout),
+        left: DockModel.sectionLength(root.layout, 0),
+        center: DockModel.sectionLength(root.layout, 1),
+        right: DockModel.sectionLength(root.layout, 2),
         hasShell: !!(root.shell && typeof root.shell.updateEntryInline === "function")
       })
     }
@@ -1767,6 +2458,7 @@ Item {
       DockPanel {
         required property var modelData
         screen: modelData
+        outputName: modelData ? String(modelData.name || "") : ""
       }
     }
   }
@@ -1777,6 +2469,7 @@ Item {
       EdgePanel {
         required property var modelData
         screen: modelData
+        outputName: modelData ? String(modelData.name || "") : ""
       }
     }
   }
@@ -1801,28 +2494,103 @@ Item {
     }
   }
 
+  component StatusToggle: BorderSurface {
+    id: toggleRoot
+    property string label: ""
+    property bool checked: false
+    signal clicked()
+
+    implicitHeight: Style.space(48)
+    radius: Style.cornerRadius
+    color: Style.controlFill(false, toggleMouse.containsMouse, root.menuForeground, Color.accent)
+    borderSpec: Border.controlSpec(toggleMouse.containsMouse ? "hover-cursor" : "normal", root.menuForeground, Color.accent)
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(12)
+      anchors.rightMargin: Style.space(12)
+      spacing: Style.space(8)
+
+      Text {
+        width: parent.width - track.width - parent.spacing
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: label
+        color: root.menuForeground
+        font.family: Style.font.menuFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Rectangle {
+        id: track
+        width: Style.space(44)
+        height: Style.space(24)
+        radius: height / 2
+        anchors.verticalCenter: parent.verticalCenter
+        color: checked ? "#2f9e44" : "#d64545"
+        Behavior on color { ColorAnimation { duration: 120 } }
+
+        Rectangle {
+          width: parent.height - Style.space(4)
+          height: width
+          radius: height / 2
+          anchors.verticalCenter: parent.verticalCenter
+          x: checked ? parent.width - width - Style.space(2) : Style.space(2)
+          color: "#ffffff"
+          Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+        }
+      }
+    }
+
+    MouseArea {
+      id: toggleMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: toggleRoot.clicked()
+    }
+  }
+
   component EdgePanel: PanelWindow {
     id: edgeWindow
-    readonly property bool armed: root.autoHide && !root.revealed
+    property string outputName: ""
+    readonly property var screenLook: {
+      root.workspaceLooks; root.defaultLook; Hyprland.focusedWorkspace
+      return root.lookFor(root.workspaceIdForOutput(outputName))
+    }
+    readonly property string screenEdge: root.metricsForLook(screenLook).barEdge
+    // outputName comes from the delegate so this binding does not read screen.
+    readonly property bool localRevealed: {
+      root.workspaceLooks; root.defaultLook; root.revealHeld; root.hovered; root.uiHeld
+      root.revealScreenName; root.menuScreen; outputName
+      return root.screenRevealedName(outputName)
+    }
+    readonly property bool armed: screenLook.autoHide && !localRevealed
     visible: armed
     exclusionMode: ExclusionMode.Ignore
     color: "transparent"
     surfaceFormat.opaque: false
     WlrLayershell.namespace: "drace3000-bottom-dock-edge"
     WlrLayershell.layer: WlrLayer.Overlay
-    anchors.left: root.barEdge === "left" || root.barEdge === "bottom"
-    anchors.right: root.barEdge === "right" || root.barEdge === "bottom"
-    anchors.top: root.barEdge !== "bottom"
+    anchors.left: screenEdge === "left" || screenEdge === "bottom"
+    anchors.right: screenEdge === "right" || screenEdge === "bottom"
+    anchors.top: screenEdge !== "bottom"
     anchors.bottom: true
-    implicitWidth: root.barEdge === "bottom" ? 0 : root.edgeSize
-    implicitHeight: root.barEdge === "bottom" ? root.edgeSize : 0
+    margins.top: screenEdge === "bottom" ? 0 : root.endGap
+    margins.bottom: screenEdge === "bottom" ? 0 : root.endGap
+    margins.left: screenEdge === "bottom" ? root.endGap : 0
+    margins.right: screenEdge === "bottom" ? root.endGap : 0
+    implicitWidth: screenEdge === "bottom" ? 0 : root.edgeSize
+    implicitHeight: screenEdge === "bottom" ? root.edgeSize : 0
     HoverHandler {
       enabled: edgeWindow.armed
       onHoveredChanged: {
         if (hovered) {
           if (edgeWindow.screen) root.noteEdgeHold(edgeWindow.screen)
-          root.armReveal()
-        } else if (!root.revealed) {
+          root.armReveal(edgeWindow.screen)
+        } else if (!root.screenRevealed(edgeWindow.screen)) {
           root.releaseRevealSoon()
         }
       }
@@ -1831,21 +2599,45 @@ Item {
 
   component DockPanel: PanelWindow {
     id: dockWindow
+    property string outputName: ""
+    // outputName comes from the delegate so this binding does not read screen.
+    readonly property bool localRevealed: {
+      root.workspaceLooks; root.defaultLook; root.revealHeld; root.hovered; root.uiHeld
+      root.revealScreenName; root.menuScreen; outputName
+      return root.screenRevealedName(outputName)
+    }
+    property int localSlide: localRevealed ? 0 : dockWindow.screenMetrics.hideOffset
+    Behavior on localSlide {
+      NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+    }
     visible: true
-    exclusionMode: root.autoHide ? ExclusionMode.Ignore : ExclusionMode.Auto
+    exclusionMode: dockWindow.screenLook.autoHide ? ExclusionMode.Ignore : ExclusionMode.Auto
     color: "transparent"
     surfaceFormat.opaque: false
     WlrLayershell.namespace: "drace3000-bottom-dock"
     WlrLayershell.layer: WlrLayer.Top
-    anchors.left: root.barEdge === "left" || root.barEdge === "bottom"
-    anchors.right: root.barEdge === "right" || root.barEdge === "bottom"
-    anchors.top: root.barEdge !== "bottom"
+    readonly property bool verticalBar: dockWindow.screenEdge !== "bottom"
+    readonly property var insets: {
+      var _tick = root.resizePreviewTick
+      return root.panelInsets(dockWindow.screen, screenLayout, screenLook)
+    }
+    anchors.left: verticalBar ? dockWindow.screenEdge === "left" : true
+    anchors.right: verticalBar ? dockWindow.screenEdge === "right" : true
+    anchors.top: verticalBar
     anchors.bottom: true
-    margins.left: root.barEdge === "left" ? -root.slideOffset : 0
-    margins.right: root.barEdge === "right" ? -root.slideOffset : 0
-    margins.bottom: root.barEdge === "bottom" ? -root.slideOffset : 0
-    implicitWidth: root.barEdge === "bottom" ? 0 : root.dockHeight
-    implicitHeight: root.barEdge === "bottom" ? root.dockHeight : 0
+    readonly property bool resizePinned: root.resizeFrozenLead >= 0 && dockWindow.screenWorkspaceId === root.workspaceId
+    margins.top: verticalBar && resizePinned ? root.resizeFrozenLead : (verticalBar ? insets.lead : 0)
+    margins.bottom: verticalBar && resizePinned
+      ? Math.max(0, (dockWindow.screen ? dockWindow.screen.height : 0) - root.resizeFrozenLead - insets.fitted)
+      : (verticalBar ? insets.trail : -localSlide)
+    margins.left: !verticalBar && resizePinned
+      ? root.resizeFrozenLead
+      : (verticalBar ? (dockWindow.screenEdge === "left" ? -localSlide : 0) : insets.lead)
+    margins.right: !verticalBar && resizePinned
+      ? Math.max(0, (dockWindow.screen ? dockWindow.screen.width : 0) - root.resizeFrozenLead - insets.fitted)
+      : (verticalBar ? (dockWindow.screenEdge === "right" ? -localSlide : 0) : insets.trail)
+    implicitWidth: verticalBar ? dockWindow.screenBarCross : insets.fitted
+    implicitHeight: verticalBar ? insets.fitted : dockWindow.screenBarCross
 
     // Bind icons to this monitor's active workspace, not the globally
     // focused one. Moving the cursor to another output must not rewrite
@@ -1873,28 +2665,46 @@ Item {
       return root.layoutForWorkspaceKey(dockWindow.screenWorkspaceId)
     }
     readonly property bool layoutEmpty: DockModel.isEmpty(screenLayout)
+    readonly property var screenLook: {
+      var _looks = root.workspaceLooks
+      var _def = root.defaultLook
+      var _id = screenWorkspaceId
+      return root.lookFor(_id)
+    }
+    readonly property var screenMetrics: root.metricsForLook(screenLook)
+    readonly property string screenEdge: screenMetrics.barEdge
+    readonly property int screenIconSlot: screenMetrics.iconSlot
+    readonly property int screenKeybindSlot: screenMetrics.keybindSlot
+    readonly property int screenBarCross: screenMetrics.barCross
+    readonly property int screenGroupGap: screenMetrics.groupGap
+    readonly property color screenFill: root.fillForLook(screenLook)
+    readonly property bool screenShowTips: screenLook.showTips !== false
 
     HoverHandler {
       onHoveredChanged: {
         if (hovered && dockWindow.screen)
           root.noteEdgeHold(dockWindow.screen)
-        root.setHovered(hovered)
+        root.setHovered(hovered, dockWindow.screen)
       }
-      Component.onDestruction: if (hovered) root.setHovered(false)
+      Component.onDestruction: if (hovered) root.setHovered(false, dockWindow.screen)
     }
 
     Rectangle {
       id: chrome
       anchors.fill: parent
-      color: Qt.rgba(root.barFill.r, root.barFill.g, root.barFill.b, root.bgOpacity / 100)
+      color: Qt.rgba(dockWindow.screenFill.r, dockWindow.screenFill.g, dockWindow.screenFill.b, dockWindow.screenLook.bgOpacity / 100)
       border.color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.18)
       border.width: 1
+      topLeftRadius: Style.space(10)
+      topRightRadius: Style.space(10)
+      bottomLeftRadius: Style.space(10)
+      bottomRightRadius: Style.space(10)
 
       WheelHandler {
         // Grab wheel over the whole chrome, including over icon MouseAreas.
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         grabPermissions: PointerHandler.CanTakeOverFromAnything | PointerHandler.ApprovesTakeOverByAnything
-        onWheel: function(event) { root.handleDockWheel(event) }
+        onWheel: function(event) { root.handleDockWheel(event, dockWindow.screenWorkspaceId) }
       }
 
       MouseArea {
@@ -1922,13 +2732,13 @@ Item {
           dragW = pt.w
           dragH = pt.h
           if (dragW < 1 || dragH < 1) return
-          var edge = root.edgeFromDrag(root.barEdge, dragX0, dragY0, dragX1, dragY1, dragW, dragH)
+          var edge = root.edgeFromDrag(dockWindow.screenEdge, dragX0, dragY0, dragX1, dragY1, dragW, dragH)
           root.showEdgeHint(dockWindow.screen, dragX1, dragY1, edge)
         }
 
         onEntered: {
-          if (!root.showTips) return
-          var g = mapToGlobal(mouseX, 0)
+          if (!dockWindow.screenShowTips) return
+          var g = root.globalFromPanel(dockWindow, mouseX, 0)
           root.showIconTip(dockWindow.screen, g.x, g.y, root.blankBarTip)
         }
         onPressed: function(mouse) {
@@ -1946,8 +2756,8 @@ Item {
           dragW = pt.w
           dragH = pt.h
           root.barEdgeDragging = true
-          root.armReveal()
-          root.showEdgeHint(dockWindow.screen, pt.x, pt.y, root.barEdge)
+          root.armReveal(dockWindow.screen)
+          root.showEdgeHint(dockWindow.screen, pt.x, pt.y, dockWindow.screenEdge)
           mouse.accepted = true
         }
         onPositionChanged: function(mouse) {
@@ -1955,8 +2765,8 @@ Item {
             trackEdge(mouse.x, mouse.y)
             return
           }
-          if (!containsMouse || !root.showTips || root.dragging || root.barEdgeDragging || root.menuOpen) return
-          var g = mapToGlobal(mouse.x, 0)
+          if (!containsMouse || !dockWindow.screenShowTips || root.dragging || root.barEdgeDragging || root.menuOpen) return
+          var g = root.globalFromPanel(dockWindow, mouse.x, mouse.y)
           root.refreshIconTipPosition(dockWindow.screen, g.x, g.y)
           if (root.tipVisible && root.tipText === root.blankBarTip) return
           if (!root.tipVisible && tipDelay.running && root.tipText === root.blankBarTip) return
@@ -1966,11 +2776,11 @@ Item {
           if (!edgeDrag) return
           trackEdge(mouse.x, mouse.y)
           edgeDrag = false
-          var edge = root.barEdge
+          var edge = dockWindow.screenEdge
           if (dragW > 1 && dragH > 1)
-            edge = root.edgeFromDrag(root.barEdge, dragX0, dragY0, dragX1, dragY1, dragW, dragH)
+            edge = root.edgeFromDrag(dockWindow.screenEdge, dragX0, dragY0, dragX1, dragY1, dragW, dragH)
           root.barEdgeDragging = false
-          root.setBarEdge(edge)
+          root.setBarEdge(edge, dockWindow.screen)
           root.hideIconTip()
         }
         onExited: {
@@ -1980,14 +2790,16 @@ Item {
         onClicked: function(mouse) {
           if (mouse.button !== Qt.RightButton) return
           root.hideIconTip()
-          var g = mapToGlobal(mouse.x, mouse.y)
+          var target = dockRow.sectionAt(mouse.x, mouse.y)
+          root.menuSectionIndex = target ? Number(target.section) : -1
+          var g = root.globalFromPanel(dockWindow, mouse.x, mouse.y)
           root.openDockMenu(dockWindow.screen, g.x, g.y)
         }
-        onWheel: function(wheel) { root.handleDockWheel(wheel) }
+        onWheel: function(wheel) { root.handleDockWheel(wheel, dockWindow.screenWorkspaceId) }
       }
 
       Text {
-        visible: dockWindow.layoutEmpty
+        visible: dockWindow.layoutEmpty && DockModel.groupCount(dockWindow.screenLayout) === 0
         anchors.centerIn: parent
         textFormat: Text.PlainText
         text: "Right click to start customization"
@@ -1997,14 +2809,37 @@ Item {
         font.bold: true
       }
 
+      GlobalToggle {
+        visible: DockModel.groupCount(dockWindow.screenLayout) === 0
+        z: 5
+        slot: dockWindow.screenIconSlot
+        upright: !dockWindow.verticalBar
+        screen: dockWindow.screen
+        panel: dockWindow
+        chromeItem: chrome
+        x: upright ? parent.width - width - Style.space(10) : (parent.width - width) / 2
+        y: upright ? (parent.height - height) / 2 : parent.height - height - Style.space(6)
+      }
+
       Item {
         id: dockRow
-        visible: !dockWindow.layoutEmpty
+        visible: DockModel.groupCount(dockWindow.screenLayout) > 0
         anchors.fill: parent
-        anchors.margins: Style.space(10)
+        anchors.leftMargin: vertical ? root.sideInset : Style.space(10)
+        anchors.rightMargin: vertical ? root.sideInset : Style.space(10)
+        anchors.topMargin: vertical ? Style.space(6) : root.sideInset
+        anchors.bottomMargin: vertical ? Style.space(6) : root.sideInset
 
-        readonly property bool vertical: root.barEdge !== "bottom"
+        readonly property bool vertical: dockWindow.screenEdge !== "bottom"
         readonly property int sectionGap: Style.space(4)
+        readonly property var sectionModels: {
+          var layout = dockWindow.screenLayout
+          return layout && layout.sections ? layout.sections : []
+        }
+
+        function sectionByIndex(index) {
+          return sectionRepeater.itemAt(index)
+        }
 
         function sectionAt(chromeX, chromeY) {
           function hit(sectionItem, name) {
@@ -2014,11 +2849,9 @@ Item {
             var padY = root.dragging ? Style.space(8) : 0
             if (p.x >= -padX && p.x <= sectionItem.width + padX
                 && p.y >= -padY && p.y <= sectionItem.height + padY) {
-              var pitch = root.iconSlot + dockRow.sectionGap
               var along = dockRow.vertical ? p.y : p.x
-              var idx = pitch > 0 ? Math.round(along / pitch) : 0
+              var idx = sectionItem.indexAt(along)
               var count = sectionItem.model ? sectionItem.model.length : 0
-              // If dragging within this section, model still includes the item.
               if (idx < 0) idx = 0
               if (idx > count) idx = count
               return { section: name, index: idx }
@@ -2026,28 +2859,59 @@ Item {
             return null
           }
 
-          var leftHit = hit(leftSection, "left")
-          if (leftHit) return leftHit
-          var centerHit = hit(centerSection, "center")
-          if (centerHit) return centerHit
-          var rightHit = hit(rightSection, "right")
-          if (rightHit) return rightHit
+          var count = sectionRepeater.count
+          for (var h = 0; h < count; h++) {
+            var direct = hit(sectionByIndex(h), String(h))
+            if (direct) return direct
+          }
 
-          // Spacers / empty zones: thirds along the bar.
-          var shown = dockWindow.screenLayout
-          var rel = dockRow.vertical
-            ? chromeY / Math.max(1, chrome.height)
-            : chromeX / Math.max(1, chrome.width)
-          if (rel < 0.33) {
-            var leftCount = shown && shown.left ? shown.left.length : 0
-            return { section: "left", index: leftCount }
+          var along = dockRow.vertical ? chromeY : chromeX
+          var best = null
+          var bestDist = 1e9
+          for (var i = 0; i < count; i++) {
+            var sec = sectionByIndex(i)
+            if (!sec) continue
+            var origin = sec.mapToItem(chrome, 0, 0)
+            var start = dockRow.vertical ? origin.y : origin.x
+            var span = dockRow.vertical ? sec.height : sec.width
+            if (span <= 0) continue
+            var end = start + span
+            var dist = along < start ? start - along : along > end ? along - end : 0
+            if (dist >= bestDist) continue
+            bestDist = dist
+            var icons = sec.model ? sec.model.length : 0
+            var idx = along > end ? icons : 0
+            best = { section: String(i), index: idx }
           }
-          if (rel > 0.66) {
-            var rightCount = shown && shown.right ? shown.right.length : 0
-            return { section: "right", index: rightCount }
+          if (best) return best
+          return count ? { section: "0", index: 0 } : null
+        }
+
+        function packedStart(sectionItem) {
+          var pos = 0
+          var placed = false
+          var count = sectionRepeater.count
+          for (var i = 0; i < count; i++) {
+            var sec = sectionByIndex(i)
+            if (!sec) continue
+            var span = dockRow.vertical ? sec.implicitHeight : sec.implicitWidth
+            if (sec === sectionItem)
+              return pos
+            if (span <= 0) continue
+            pos += span
+            placed = true
           }
-          var centerCount = shown && shown.center ? shown.center.length : 0
-          return { section: "center", index: centerCount }
+          return pos
+        }
+
+        function globeStart() {
+          var count = sectionRepeater.count
+          if (!count) return 0
+          var last = sectionByIndex(count - 1)
+          if (!last) return 0
+          var pos = packedStart(last)
+          var span = dockRow.vertical ? last.implicitHeight : last.implicitWidth
+          return pos + span
         }
 
         function trackDragAt(chromeX, chromeY) {
@@ -2056,43 +2920,48 @@ Item {
           if (target) root.setIconDropTarget(target.section, target.index)
         }
 
-        DockSection {
-          id: leftSection
-          sectionName: "left"
-          x: dockRow.vertical ? (parent.width - width) / 2 : 0
-          y: dockRow.vertical ? 0 : (parent.height - height) / 2
-          width: implicitWidth
-          height: implicitHeight
-          model: (dockWindow.screenLayout && dockWindow.screenLayout.left) ? dockWindow.screenLayout.left : []
-          hostScreen: dockWindow.screen
-          chromeItem: chrome
-          trackDrag: dockRow.trackDragAt
+        Repeater {
+          id: sectionRepeater
+          model: dockRow.sectionModels
+          delegate: DockSection {
+            id: sectionItem
+            required property var modelData
+            required property int index
+            sectionName: String(index)
+            leadGap: index > 0 ? dockWindow.screenGroupGap : 0
+            sectionSpan: {
+              var _tick = root.resizePreviewTick
+              var live = root.layoutForWorkspaceKey(dockWindow.screenWorkspaceId)
+              var sections = live && live.sections ? live.sections : null
+              var sec = sections ? sections[index] : null
+              if (sec) return Math.max(0, Math.round(Number(sec.span) || 0))
+              return Math.max(0, Math.round(Number(modelData.span) || 0))
+            }
+            x: dockRow.vertical ? (parent.width - width) / 2 : dockRow.packedStart(sectionItem)
+            y: dockRow.vertical ? dockRow.packedStart(sectionItem) : (parent.height - height) / 2
+            width: implicitWidth
+            height: implicitHeight
+            model: modelData.items || []
+            hostScreen: dockWindow.screen
+            panelWindow: dockWindow
+            chromeItem: chrome
+            trackDrag: dockRow.trackDragAt
+            barEdge: dockWindow.screenEdge
+            iconSlot: dockWindow.screenIconSlot
+            keybindSlot: dockWindow.screenKeybindSlot
+          }
         }
 
-        DockSection {
-          id: centerSection
-          sectionName: "center"
-          x: (parent.width - width) / 2
-          y: (parent.height - height) / 2
-          width: implicitWidth
-          height: implicitHeight
-          model: (dockWindow.screenLayout && dockWindow.screenLayout.center) ? dockWindow.screenLayout.center : []
-          hostScreen: dockWindow.screen
+        GlobalToggle {
+          z: 5
+          canResize: true
+          slot: dockWindow.screenIconSlot
+          upright: !dockRow.vertical
+          screen: dockWindow.screen
+          panel: dockWindow
           chromeItem: chrome
-          trackDrag: dockRow.trackDragAt
-        }
-
-        DockSection {
-          id: rightSection
-          sectionName: "right"
-          x: dockRow.vertical ? (parent.width - width) / 2 : parent.width - width
-          y: dockRow.vertical ? parent.height - height : (parent.height - height) / 2
-          width: implicitWidth
-          height: implicitHeight
-          model: (dockWindow.screenLayout && dockWindow.screenLayout.right) ? dockWindow.screenLayout.right : []
-          hostScreen: dockWindow.screen
-          chromeItem: chrome
-          trackDrag: dockRow.trackDragAt
+          x: dockRow.vertical ? (parent.width - width) / 2 : dockRow.globeStart()
+          y: dockRow.vertical ? dockRow.globeStart() : (parent.height - height) / 2
         }
       }
 
@@ -2106,21 +2975,18 @@ Item {
         Rectangle {
           id: insertCaret
           visible: root.dropSection !== ""
-          readonly property bool verticalBar: root.barEdge !== "bottom"
-          readonly property var sectionItem: root.dropSection === "left" ? leftSection
-            : root.dropSection === "right" ? rightSection
-            : centerSection
+          readonly property bool verticalBar: dockWindow.screenEdge !== "bottom"
+          readonly property var sectionItem: dockRow.sectionByIndex(Number(root.dropSection))
           readonly property real along: {
-            var pitch = root.iconSlot + Style.space(4)
-            var local = root.dropIndex * pitch - 1
+            var local = sectionItem ? sectionItem.offsetOf(root.dropIndex) - 1 : 0
             if (!sectionItem) return 0
             var mapped = verticalBar
               ? mapFromItem(sectionItem, 0, local)
               : mapFromItem(sectionItem, local, 0)
             return verticalBar ? mapped.y : mapped.x
           }
-          width: verticalBar ? root.iconSlot : 2
-          height: verticalBar ? 2 : root.iconSlot
+          width: verticalBar ? dockWindow.screenIconSlot : 2
+          height: verticalBar ? 2 : dockWindow.screenIconSlot
           radius: 1
           color: root.ink
           opacity: 0.85
@@ -2130,8 +2996,8 @@ Item {
 
         Rectangle {
           id: dragGhost
-          width: root.iconSlot
-          height: root.iconSlot
+          width: root.dragGhostBadge.length && dockWindow.screenEdge === "bottom" ? dockWindow.screenKeybindSlot : dockWindow.screenIconSlot
+          height: root.dragGhostBadge.length && dockWindow.screenEdge !== "bottom" ? dockWindow.screenKeybindSlot : dockWindow.screenIconSlot
           radius: Style.space(8)
           x: root.dragGhostX
           y: root.dragGhostY
@@ -2143,18 +3009,19 @@ Item {
           Text {
             visible: root.dragGhostBadge.length > 0
             anchors.centerIn: parent
-            text: root.dragGhostBadge
+            text: dockWindow.screenEdge === "bottom" ? root.dragGhostBadge : root.dragGhostBadge.split("").join("\n")
+            horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText
             color: root.ink
             font.family: Style.font.menuFamily
-            font.pixelSize: Math.max(10, Math.round(root.iconSlot * 0.34))
+            font.pixelSize: Math.max(10, Math.round(dockWindow.screenIconSlot * 0.34))
             font.bold: true
           }
 
           Image {
             visible: root.dragGhostBadge.length === 0
             anchors.centerIn: parent
-            width: root.iconSlot - Style.space(2)
+            width: dockWindow.screenIconSlot - Style.space(2)
             height: width
             source: root.dragGhostSource
             fillMode: Image.PreserveAspectFit
@@ -2171,7 +3038,7 @@ Item {
 
           Rectangle {
             id: ghostRoundMask
-            width: root.iconSlot - Style.space(2)
+            width: dockWindow.screenIconSlot - Style.space(2)
             height: width
             visible: false
             color: "#ffffff"
@@ -2184,28 +3051,414 @@ Item {
     }
   }
 
+  component GlobalToggle: Item {
+    id: toggleRoot
+    property int slot: root.iconSlot
+    property bool upright: true
+    property var screen: null
+    property var panel: null
+    property Item chromeItem: null
+    property bool canResize: false
+    readonly property color ink: root.globalChanges ? "#39FF14" : "#FF3131"
+    readonly property int gap: Style.space(8)
+    readonly property int rule: Math.max(2, Math.round(Style.space(1)))
+    readonly property int ruleLength: Math.round(slot * 0.72)
+    readonly property int gearGap: Style.space(6)
+    implicitWidth: upright ? gap + rule + gap + slot + gearGap + slot : slot
+    implicitHeight: upright ? slot : gap + rule + gap + slot + gearGap + slot
+
+    Item {
+      id: tailRule
+      z: 2
+      width: toggleRoot.upright ? toggleRoot.gap + toggleRoot.rule + toggleRoot.gap : parent.width
+      height: toggleRoot.upright ? parent.height : toggleRoot.gap + toggleRoot.rule + toggleRoot.gap
+
+      Rectangle {
+        anchors.centerIn: parent
+        color: root.activeBorder
+        radius: width < height ? width / 2 : height / 2
+        width: toggleRoot.upright ? toggleRoot.rule : toggleRoot.ruleLength
+        height: toggleRoot.upright ? toggleRoot.ruleLength : toggleRoot.rule
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        enabled: toggleRoot.canResize
+        hoverEnabled: true
+        cursorShape: toggleRoot.upright ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        acceptedButtons: Qt.LeftButton
+        onPressed: function(mouse) {
+          root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
+          if (!toggleRoot.chromeItem) return
+          var mapped = mapToItem(toggleRoot.chromeItem, mouse.x, mouse.y)
+          root.beginTailResize(toggleRoot.panel, toggleRoot.upright ? mapped.x : mapped.y)
+          mouse.accepted = true
+        }
+        onPositionChanged: function(mouse) {
+          var superHeld = (mouse.modifiers & Qt.MetaModifier) !== 0
+          root.superDown = superHeld
+          if (!toggleRoot.chromeItem) return
+          var mapped = mapToItem(toggleRoot.chromeItem, mouse.x, mouse.y)
+          var along = toggleRoot.upright ? mapped.x : mapped.y
+          if (!(pressed || superHeld)) {
+            if (root.resizeTail) root.endSectionResize()
+            return
+          }
+          if (!root.resizeTail)
+            root.beginTailResize(toggleRoot.panel, along)
+          else
+            root.updateSectionResize(toggleRoot.panel, along)
+        }
+        onExited: if (!pressed && root.resizeTail) root.endSectionResize()
+        onReleased: function(mouse) {
+          root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
+          if (!root.superDown) root.endSectionResize()
+        }
+        onCanceled: if (root.resizeTail) root.endSectionResize()
+      }
+    }
+
+    Item {
+      id: globeHit
+      x: toggleRoot.upright ? toggleRoot.gap + toggleRoot.rule + toggleRoot.gap : 0
+      y: toggleRoot.upright ? 0 : toggleRoot.gap + toggleRoot.rule + toggleRoot.gap
+      width: toggleRoot.slot
+      height: toggleRoot.slot
+
+      Canvas {
+        id: globeMark
+        anchors.centerIn: parent
+        width: parent.width - Style.space(2)
+        height: width
+        onPaint: {
+          var ctx = getContext("2d")
+          var w = width
+          var h = height
+          ctx.clearRect(0, 0, w, h)
+          ctx.fillStyle = toggleRoot.ink
+          var d = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
+          var tokens = []
+          var re = /[MmLlHhVvCcSsZz]|-?\d*\.?\d+/g
+          var found = d.match(re) || []
+          for (var t = 0; t < found.length; t++) tokens.push(found[t])
+          var scale = Math.min(w, h) / 24
+          var ox = (w - 24 * scale) / 2
+          var oy = (h - 24 * scale) / 2
+          function px(v) { return ox + v * scale }
+          function py(v) { return oy + v * scale }
+          var i = 0
+          var cx = 0
+          var cy = 0
+          var sx = 0
+          var sy = 0
+          var prev = ""
+          var cpx = 0
+          var cpy = 0
+          function num() { return parseFloat(tokens[i++]) }
+          function isCmd(tok) { return tok && tok.length === 1 && tok >= "A" && tok <= "z" }
+          ctx.beginPath()
+          while (i < tokens.length) {
+            var cmd = isCmd(tokens[i]) ? tokens[i++] : prev
+            if (cmd === "M" || cmd === "m") {
+              var mx = num()
+              var my = num()
+              if (cmd === "m") { mx += cx; my += cy }
+              ctx.moveTo(px(mx), py(my))
+              cx = mx; cy = my; sx = mx; sy = my
+              prev = cmd === "m" ? "l" : "L"
+            } else if (cmd === "L" || cmd === "l") {
+              var lx = num()
+              var ly = num()
+              if (cmd === "l") { lx += cx; ly += cy }
+              ctx.lineTo(px(lx), py(ly))
+              cx = lx; cy = ly; prev = cmd
+            } else if (cmd === "H" || cmd === "h") {
+              var hx = num()
+              if (cmd === "h") hx += cx
+              ctx.lineTo(px(hx), py(cy))
+              cx = hx; prev = cmd
+            } else if (cmd === "V" || cmd === "v") {
+              var hy = num()
+              if (cmd === "v") hy += cy
+              ctx.lineTo(px(cx), py(hy))
+              cy = hy; prev = cmd
+            } else if (cmd === "C" || cmd === "c") {
+              var c1x = num(), c1y = num(), c2x = num(), c2y = num(), ex = num(), ey = num()
+              if (cmd === "c") {
+                c1x += cx; c1y += cy; c2x += cx; c2y += cy; ex += cx; ey += cy
+              }
+              ctx.bezierCurveTo(px(c1x), py(c1y), px(c2x), py(c2y), px(ex), py(ey))
+              cpx = c2x; cpy = c2y; cx = ex; cy = ey; prev = cmd
+            } else if (cmd === "S" || cmd === "s") {
+              var s2x = num(), s2y = num(), sex = num(), sey = num()
+              var s1x = cx
+              var s1y = cy
+              if (prev === "C" || prev === "c" || prev === "S" || prev === "s") {
+                s1x = 2 * cx - cpx
+                s1y = 2 * cy - cpy
+              }
+              if (cmd === "s") { s2x += cx; s2y += cy; sex += cx; sey += cy }
+              ctx.bezierCurveTo(px(s1x), py(s1y), px(s2x), py(s2y), px(sex), py(sey))
+              cpx = s2x; cpy = s2y; cx = sex; cy = sey; prev = cmd
+            } else if (cmd === "Z" || cmd === "z") {
+              ctx.closePath()
+              cx = sx; cy = sy; prev = cmd
+            } else {
+              break
+            }
+          }
+          ctx.fill()
+        }
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        Connections {
+          target: toggleRoot
+          function onInkChanged() { globeMark.requestPaint() }
+        }
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: function(mouse) {
+          if (mouse.button === Qt.RightButton) {
+            if (!toggleRoot.panel || !toggleRoot.chromeItem) return
+            var p = mapToItem(toggleRoot.chromeItem, mouse.x, mouse.y)
+            var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
+            root.openDockMenu(toggleRoot.screen, g.x, g.y)
+            return
+          }
+          root.toggleGlobalChanges()
+        }
+        onEntered: {
+          if (!toggleRoot.panel || !toggleRoot.chromeItem) return
+          var p = mapToItem(toggleRoot.chromeItem, width / 2, 0)
+          var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
+          var label = root.globalChanges ? "Global changes" : "Local changes"
+          root.showIconTip(toggleRoot.screen, g.x, g.y, label)
+        }
+        onExited: root.hideIconTip()
+      }
+    }
+
+    Item {
+      id: gearHit
+      x: globeHit.x + (toggleRoot.upright ? toggleRoot.slot + toggleRoot.gearGap : 0)
+      y: globeHit.y + (toggleRoot.upright ? 0 : toggleRoot.slot + toggleRoot.gearGap)
+      width: toggleRoot.slot
+      height: toggleRoot.slot
+
+      Canvas {
+        id: gearMark
+        anchors.centerIn: parent
+        width: parent.width - Style.space(4)
+        height: width
+        property color ink: gearMouse.containsMouse ? Color.accent : root.ink
+        onPaint: {
+          var ctx = getContext("2d")
+          var w = width
+          var h = height
+          ctx.clearRect(0, 0, w, h)
+          ctx.fillStyle = gearMark.ink
+          ctx.strokeStyle = gearMark.ink
+          var cx = w / 2
+          var cy = h / 2
+          ctx.lineWidth = Math.max(2, w * 0.14)
+          ctx.beginPath()
+          ctx.arc(cx, cy, w * 0.26, 0, Math.PI * 2)
+          ctx.stroke()
+          for (var tooth = 0; tooth < 8; tooth++) {
+            ctx.save()
+            ctx.translate(cx, cy)
+            ctx.rotate(tooth * Math.PI / 4)
+            ctx.fillRect(-w * 0.07, -w * 0.48, w * 0.14, w * 0.18)
+            ctx.restore()
+          }
+        }
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onInkChanged: requestPaint()
+      }
+
+      MouseArea {
+        id: gearMouse
+        anchors.fill: parent
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: function(mouse) {
+          if (!toggleRoot.panel || !toggleRoot.chromeItem) return
+          root.menuSectionIndex = -1
+          root.confirmRemoveOpen = false
+          var p = mapToItem(toggleRoot.chromeItem, width / 2, height / 2)
+          var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
+          root.openDockMenu(toggleRoot.screen, g.x, g.y)
+        }
+        onEntered: {
+          gearMark.requestPaint()
+          if (!toggleRoot.panel || !toggleRoot.chromeItem) return
+          var p = mapToItem(toggleRoot.chromeItem, width / 2, 0)
+          var g = root.globalFromPanel(toggleRoot.panel, p.x, p.y)
+          root.showIconTip(toggleRoot.screen, g.x, g.y, "Task bar settings")
+        }
+        onExited: {
+          gearMark.requestPaint()
+          root.hideIconTip()
+        }
+      }
+    }
+  }
+
   component DockSection: Item {
     id: sectionRoot
     property string sectionName: "center"
     property var model: []
     property var hostScreen: null
+    property var panelWindow: null
     property Item chromeItem: null
     property var trackDrag: null
-    readonly property bool vertical: root.barEdge !== "bottom"
-    readonly property int iconPitch: root.iconSlot + Style.space(4)
+    property string barEdge: root.barEdge
+    property int iconSlot: root.iconSlot
+    property int keybindSlot: root.keybindSlot
+    readonly property bool vertical: barEdge !== "bottom"
     readonly property int iconCount: model ? model.length : 0
-    implicitWidth: vertical
-      ? root.iconSlot
-      : Math.max(iconCount > 0 ? iconCount * iconPitch - Style.space(4) : 0, root.dragging ? root.iconSlot : 0)
-    implicitHeight: vertical
-      ? Math.max(iconCount > 0 ? iconCount * iconPitch - Style.space(4) : 0, root.dragging ? root.iconSlot : 0)
-      : root.iconSlot
+    // Shared with the other two groups. Icons are centered in every section.
+    property int sectionSpan: 0
+    property int leadGap: 0
+
+    function spanOf(item) {
+      return item && String(item.kind || "") === "keybind" ? sectionRoot.keybindSlot : sectionRoot.iconSlot
+    }
+
+    function contentSpan() {
+      var items = model || []
+      if (!items.length)
+        return root.dragging ? iconSlot : 0
+      var gap = Style.space(4)
+      var total = 0
+      for (var i = 0; i < items.length; i++)
+        total += spanOf(items[i])
+      if (items.length > 1)
+        total += gap * (items.length - 1)
+      return Math.max(total, root.dragging ? iconSlot : 0)
+    }
+
+    function contentOrigin() {
+      var along = vertical ? height : width
+      var room = Math.max(0, along - leadGap)
+      var content = contentSpan()
+      return leadGap + Math.max(0, (room - content) / 2)
+    }
+
+    function offsetOf(index) {
+      var items = model || []
+      var gap = Style.space(4)
+      var pos = contentOrigin()
+      var n = Math.min(Math.max(0, index), items.length)
+      for (var i = 0; i < n; i++)
+        pos += spanOf(items[i]) + gap
+      return pos
+    }
+
+    function indexAt(along) {
+      var items = model || []
+      var gap = Style.space(4)
+      var pos = 0
+      var local = along - contentOrigin()
+      for (var i = 0; i < items.length; i++) {
+        var span = spanOf(items[i])
+        if (local < pos + span / 2)
+          return i
+        pos += span + gap
+      }
+      return items.length
+    }
+
+    implicitWidth: {
+      var _m = model
+      var _span = sectionSpan
+      var _lead = leadGap
+      return vertical ? sectionRoot.iconSlot : _lead + Math.max(_span, contentSpan())
+    }
+    implicitHeight: {
+      var _m = model
+      var _span = sectionSpan
+      var _lead = leadGap
+      return vertical ? _lead + Math.max(_span, contentSpan()) : sectionRoot.iconSlot
+    }
 
     Rectangle {
       anchors.fill: parent
       radius: Style.space(6)
       visible: root.dragging && root.dropSection === sectionRoot.sectionName
       color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.08)
+    }
+
+    Item {
+      id: sectionRule
+      visible: Number(sectionRoot.sectionName) > 0
+      z: 8
+      readonly property int boundary: Number(sectionRoot.sectionName) - 1
+      readonly property int gap: sectionRoot.leadGap
+      x: 0
+      y: 0
+      width: sectionRoot.vertical ? parent.width : gap
+      height: sectionRoot.vertical ? gap : parent.height
+
+      Rectangle {
+        anchors.centerIn: parent
+        color: root.activeBorder
+        radius: width < height ? width / 2 : height / 2
+        width: sectionRoot.vertical ? Math.round(sectionRoot.iconSlot * 0.72) : Math.max(2, Style.space(1))
+        height: sectionRoot.vertical ? Math.max(2, Style.space(1)) : Math.round(sectionRoot.iconSlot * 0.72)
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: sectionRoot.vertical ? Qt.SizeVerCursor : Qt.SizeHorCursor
+        acceptedButtons: Qt.LeftButton
+        preventStealing: true
+        onPressed: function(mouse) {
+          root.resizeButtonDown = true
+          root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
+          var mapped = mapToItem(sectionRoot.chromeItem, mouse.x, mouse.y)
+          var along = sectionRoot.vertical ? mapped.y : mapped.x
+          root.beginSectionResize(sectionRoot.panelWindow, sectionRule.boundary, along)
+          mouse.accepted = true
+        }
+        onPositionChanged: function(mouse) {
+          var superHeld = (mouse.modifiers & Qt.MetaModifier) !== 0
+          root.superDown = superHeld
+          var buttonDown = root.resizeButtonDown || ((mouse.buttons & Qt.LeftButton) !== 0)
+          if (!sectionRoot.chromeItem) return
+          var mapped = mapToItem(sectionRoot.chromeItem, mouse.x, mouse.y)
+          var along = sectionRoot.vertical ? mapped.y : mapped.x
+          if (!(buttonDown || superHeld)) {
+            if (!root.resizeTail && root.resizeBoundaryIndex === sectionRule.boundary)
+              root.endSectionResize()
+            return
+          }
+          if (root.resizeTail) return
+          if (root.resizeBoundaryIndex < 0)
+            root.beginSectionResize(sectionRoot.panelWindow, sectionRule.boundary, along)
+          else if (root.resizeBoundaryIndex === sectionRule.boundary)
+            root.updateSectionResize(sectionRoot.panelWindow, along)
+        }
+        onReleased: function(mouse) {
+          root.resizeButtonDown = false
+          root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
+          if (!root.superDown && !root.resizeTail && root.resizeBoundaryIndex === sectionRule.boundary)
+            root.endSectionResize()
+        }
+        onCanceled: {
+          root.resizeButtonDown = false
+          if (!root.resizeTail && root.resizeBoundaryIndex === sectionRule.boundary)
+            root.endSectionResize()
+        }
+      }
     }
 
     Item {
@@ -2218,85 +3471,185 @@ Item {
           id: iconWrap
           required property var modelData
           required property int index
-          x: sectionRoot.vertical ? 0 : index * sectionRoot.iconPitch
-          y: sectionRoot.vertical ? index * sectionRoot.iconPitch : 0
-          width: root.iconSlot
-          height: root.iconSlot
+          readonly property bool keybindIcon: String(modelData.kind || "") === "keybind"
+          x: {
+            var _m = sectionRoot.model
+            return sectionRoot.vertical ? 0 : sectionRoot.offsetOf(index)
+          }
+          y: {
+            var _m = sectionRoot.model
+            return sectionRoot.vertical ? sectionRoot.offsetOf(index) : 0
+          }
+          width: keybindIcon && sectionRoot.barEdge === "bottom" ? sectionRoot.keybindSlot : sectionRoot.iconSlot
+          height: keybindIcon && sectionRoot.barEdge !== "bottom" ? sectionRoot.keybindSlot : sectionRoot.iconSlot
           opacity: root.dragging && root.dragItem && root.dragItem.id === modelData.id ? 0.35 : 1
 
-          Rectangle {
-            id: hoverBg
-            anchors.fill: parent
-            anchors.margins: iconMouse.containsMouse && !root.dragging ? 0 : 1
-            radius: Style.space(8)
-            color: iconMouse.containsMouse && !root.dragging
-              ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.28)
-              : "transparent"
-            border.width: iconMouse.containsMouse && !root.dragging ? 1 : 0
-            border.color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.45)
-
-            Behavior on color { ColorAnimation { duration: 120 } }
-            Behavior on anchors.margins { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-          }
-
           Item {
-            id: iconClip
-            anchors.centerIn: parent
-            width: root.iconSlot - Style.space(2)
-            height: width
-            scale: iconMouse.containsMouse && !root.dragging ? 1.12 : 1.0
-            layer.enabled: cornerProbe.sharp
-            layer.smooth: true
-            layer.effect: MultiEffect {
-              maskEnabled: true
-              maskSource: iconRoundMask
-              maskThresholdMin: 0.5
-              maskSpreadAtMin: 0.18
-            }
-
-            Behavior on scale {
-              NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
-            }
-
-            Image {
-              id: iconImage
-              visible: iconWrap.modelData.kind !== "keybind"
-              anchors.fill: parent
-              source: visible ? root.iconSource(iconWrap.modelData.icon) : ""
-              fillMode: Image.PreserveAspectFit
-              smooth: true
-              asynchronous: true
-              onStatusChanged: if (status === Image.Ready) cornerProbe.scan()
-              onSourceChanged: cornerProbe.scan()
-            }
-          }
-
-          Rectangle {
-            id: keybindBadge
+            id: iconMotion
+            anchors.fill: parent
             readonly property bool hot: iconMouse.containsMouse && !root.dragging
-            visible: iconWrap.modelData.kind === "keybind"
-            anchors.fill: iconClip
-            scale: hot ? 1.12 : 1.0
-            radius: Style.space(8)
-            color: hot ? root.surface : root.ink
-            border.width: hot ? 2 : 1
-            border.color: root.ink
 
-            Behavior on color { ColorAnimation { duration: 120 } }
-            Behavior on scale {
-              NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+            Rectangle {
+              id: hoverBg
+              anchors.fill: parent
+              anchors.margins: iconMotion.hot ? 0 : 1
+              radius: Style.space(8)
+              color: iconMotion.hot
+                ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.22)
+                : "transparent"
+
+              Behavior on color { ColorAnimation { duration: 140 } }
+              Behavior on anchors.margins { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             }
 
-            Text {
+            Item {
+              id: iconClip
               anchors.centerIn: parent
-              text: String(iconWrap.modelData.badge || "").slice(0, 3)
-              textFormat: Text.PlainText
-              color: keybindBadge.hot ? root.ink : root.surface
-              font.family: Style.font.menuFamily
-              font.pixelSize: Math.max(12, Math.round(root.iconSlot * 0.42))
-              font.bold: true
+              width: sectionRoot.iconSlot - Style.space(2)
+              height: width
+              layer.enabled: cornerProbe.sharp
+              layer.smooth: true
+              layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: iconRoundMask
+                maskThresholdMin: 0.5
+                maskSpreadAtMin: 0.18
+              }
 
-              Behavior on color { ColorAnimation { duration: 120 } }
+              Image {
+                id: iconImage
+                visible: iconWrap.modelData.kind !== "keybind"
+                anchors.fill: parent
+                source: visible ? root.iconSource(iconWrap.modelData.icon) : ""
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                asynchronous: true
+                onStatusChanged: if (status === Image.Ready) cornerProbe.scan()
+                onSourceChanged: cornerProbe.scan()
+              }
+            }
+
+            Rectangle {
+              id: keybindBadge
+              readonly property bool hot: iconMotion.hot
+              visible: iconWrap.keybindIcon
+              anchors.centerIn: parent
+              width: parent.width - Style.space(2)
+              height: parent.height - Style.space(2)
+              radius: Style.space(8)
+              color: hot ? root.surface : root.ink
+              border.width: 0
+
+              Behavior on color { ColorAnimation { duration: 140 } }
+
+              Text {
+                readonly property bool upright: sectionRoot.barEdge !== "bottom"
+                readonly property string letters: String(iconWrap.modelData.badge || "").slice(0, 3)
+                anchors.fill: parent
+                anchors.leftMargin: upright ? Style.space(2) : (keybindBadge.width > sectionRoot.iconSlot ? Style.space(7) : Style.space(3))
+                anchors.rightMargin: anchors.leftMargin
+                anchors.topMargin: upright ? Style.space(3) : 0
+                anchors.bottomMargin: upright ? Style.space(3) : 0
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                text: upright ? letters.split("").join("\n") : letters
+                textFormat: Text.PlainText
+                color: keybindBadge.hot ? root.ink : root.surface
+                font.family: Style.font.menuFamily
+                font.pixelSize: {
+                  var n = 3
+                  var cap = Math.max(12, Math.round(sectionRoot.iconSlot * 0.42))
+                  if (!upright) {
+                    var pad = keybindBadge.width > sectionRoot.iconSlot ? Style.space(14) : Style.space(6)
+                    var inner = Math.max(8, keybindBadge.width - pad)
+                    var fitted = Math.floor(inner / (n * 0.68))
+                    var byHeight = Math.floor(keybindBadge.height * 0.62)
+                    return Math.max(8, Math.min(cap, byHeight, fitted))
+                  }
+                  var innerW = Math.max(8, keybindBadge.width - Style.space(4))
+                  var innerH = Math.max(8, keybindBadge.height - Style.space(6))
+                  var byWidth = Math.floor(innerW * 0.78)
+                  var byStack = Math.floor(innerH / n * 0.9)
+                  return Math.max(8, Math.min(cap, byWidth, byStack))
+                }
+                font.bold: true
+                lineHeightMode: Text.ProportionalHeight
+                lineHeight: upright ? 0.9 : 1
+                elide: upright ? Text.ElideNone : Text.ElideRight
+
+                Behavior on color { ColorAnimation { duration: 120 } }
+              }
+            }
+
+            // Faint white frame. On hover it becomes the Omarchy active-window
+            // border (cyan into green at 45 degrees) with a soft halo.
+            Rectangle {
+              id: iconRim
+              anchors.fill: iconWrap.keybindIcon ? keybindBadge : iconClip
+              readonly property real corner: iconWrap.keybindIcon
+                ? Style.space(8)
+                : Math.max(4, Math.round(Math.min(width, height) * 0.22))
+              radius: corner
+              color: "transparent"
+              border.width: 1
+              border.color: Qt.rgba(1, 1, 1, 0.62)
+              opacity: iconMotion.hot ? 0 : 1
+              z: 4
+
+              Behavior on opacity { NumberAnimation { duration: 140 } }
+            }
+
+            Canvas {
+              id: activeRim
+              anchors.fill: iconWrap.keybindIcon ? keybindBadge : iconClip
+              anchors.margins: -2
+              opacity: iconMotion.hot ? 1 : 0
+              visible: opacity > 0
+              z: 5
+
+              Behavior on opacity { NumberAnimation { duration: 140 } }
+
+              function trace(ctx, inset) {
+                var r = Math.max(2, iconRim.corner - inset * 0.2)
+                var x = inset
+                var y = inset
+                var w = width - inset * 2
+                var h = height - inset * 2
+                ctx.beginPath()
+                ctx.moveTo(x + r, y)
+                ctx.lineTo(x + w - r, y)
+                ctx.arcTo(x + w, y, x + w, y + r, r)
+                ctx.lineTo(x + w, y + h - r)
+                ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
+                ctx.lineTo(x + r, y + h)
+                ctx.arcTo(x, y + h, x, y + h - r, r)
+                ctx.lineTo(x, y + r)
+                ctx.arcTo(x, y, x + r, y, r)
+                ctx.closePath()
+              }
+
+              onWidthChanged: requestPaint()
+              onHeightChanged: requestPaint()
+              onVisibleChanged: if (visible) requestPaint()
+              onPaint: {
+                var ctx = getContext("2d")
+                ctx.clearRect(0, 0, width, height)
+                // Soft halo, then the 45-degree active-window stroke.
+                trace(ctx, 2.5)
+                ctx.lineWidth = 4
+                ctx.strokeStyle = "rgba(51, 204, 255, 0.35)"
+                ctx.shadowColor = "rgba(51, 204, 255, 0.9)"
+                ctx.shadowBlur = 3
+                ctx.stroke()
+                trace(ctx, 2.5)
+                var g = ctx.createLinearGradient(0, 0, width, height)
+                g.addColorStop(0, "rgba(51, 204, 255, 0.95)")
+                g.addColorStop(1, "rgba(0, 255, 153, 0.95)")
+                ctx.shadowBlur = 0
+                ctx.lineWidth = 1.5
+                ctx.strokeStyle = g
+                ctx.stroke()
+              }
             }
           }
 
@@ -2376,14 +3729,16 @@ Item {
           Rectangle {
             id: runDot
             readonly property bool running: root.itemIsRunning(iconWrap.modelData, sectionRoot.hostScreen, root.liveClientGen)
-            readonly property bool focused: root.itemIsFocused(iconWrap.modelData, sectionRoot.hostScreen, root.liveClientGen)
             visible: running
             z: 2
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 1
-            width: focused ? Math.max(8, root.iconSlot * 0.55) : Math.max(6, root.iconSlot * 0.34)
-            height: Math.max(3, Math.round(root.iconSlot * 0.12))
+            readonly property real iconBottom: iconWrap.keybindIcon
+              ? Math.max(0, iconWrap.width - Style.space(2))
+              : Math.max(0, sectionRoot.iconSlot - Style.space(2))
+            width: iconBottom * 0.85
+            height: Math.max(3, Math.round(sectionRoot.iconSlot * 0.12))
             radius: height / 2
             gradient: Gradient {
               orientation: Gradient.Horizontal
@@ -2409,11 +3764,17 @@ Item {
             property real hoverX: width / 2
             property real hoverY: height / 2
 
+            function pointerGlobal(localX, localY) {
+              var host = sectionRoot.chromeItem || iconWrap
+              var p = iconWrap.mapToItem(host, localX, localY)
+              return root.globalFromPanel(sectionRoot.panelWindow, p.x, p.y)
+            }
+
             onEntered: {
               hoverX = width / 2
               hoverY = height / 2
-              var g = iconWrap.mapToGlobal(hoverX, 0)
-              root.showIconTip(sectionRoot.hostScreen, g.x, g.y, DockModel.itemLabel(iconWrap.modelData))
+              var g = pointerGlobal(hoverX, 0)
+              root.showItemIconTip(sectionRoot.hostScreen, g.x, g.y, iconWrap.modelData)
             }
             onExited: {
               if (root.tipText === DockModel.itemLabel(iconWrap.modelData))
@@ -2422,11 +3783,11 @@ Item {
             onPositionChanged: function(mouse) {
               hoverX = mouse.x
               hoverY = mouse.y
-              var g = iconWrap.mapToGlobal(mouse.x, 0)
+              var g = pointerGlobal(mouse.x, mouse.y)
               if (iconMouse.containsMouse && !root.dragging && !root.menuOpen) {
                 root.refreshIconTipPosition(sectionRoot.hostScreen, g.x, g.y)
                 if (!root.tipVisible && !tipDelay.running)
-                  root.showIconTip(sectionRoot.hostScreen, g.x, g.y, DockModel.itemLabel(iconWrap.modelData))
+                  root.showItemIconTip(sectionRoot.hostScreen, g.x, g.y, iconWrap.modelData)
               }
               if (!(mouse.buttons & Qt.LeftButton)) return
               if (!dragArmed) {
@@ -2451,7 +3812,7 @@ Item {
               if (mouse.button === Qt.RightButton) {
                 if (root.dragging) root.cancelIconDrag()
                 root.hideIconTip()
-                var g = iconWrap.mapToGlobal(mouse.x, mouse.y)
+                var g = pointerGlobal(mouse.x, mouse.y)
                 root.openItemMenu(sectionRoot.hostScreen, iconWrap.modelData, g.x, g.y)
                 return
               }
@@ -2470,7 +3831,10 @@ Item {
               if (root.dragging) root.cancelIconDrag()
               root.hideIconTip()
             }
-            onWheel: function(wheel) { root.handleDockWheel(wheel) }
+            onWheel: function(wheel) {
+              var panel = sectionRoot.panelWindow
+              root.handleDockWheel(wheel, panel ? panel.screenWorkspaceId : "")
+            }
           }
         }
       }
@@ -2480,6 +3844,13 @@ Item {
   component TipPanel: PanelWindow {
     id: tipWindow
     readonly property bool forScreen: root.tipScreen === tipWindow.screen
+    readonly property var tipLook: {
+      var _looks = root.workspaceLooks
+      var _def = root.defaultLook
+      var _screen = root.tipScreen
+      return root.lookFor(root.workspaceIdForScreen(_screen))
+    }
+    readonly property var tipMetrics: root.metricsForLook(tipLook)
     visible: root.tipVisible && forScreen && root.tipText.length > 0
     exclusionMode: ExclusionMode.Ignore
     color: "transparent"
@@ -2496,39 +3867,57 @@ Item {
       id: tipCard
       readonly property int tipPadX: Style.space(16)
       readonly property int tipPadY: Style.space(12)
-      width: tipLabel.implicitWidth + tipPadX
-      height: Math.max(Style.space(28), tipLabel.implicitHeight + tipPadY)
+      readonly property int tipCount: {
+        var _gen = root.liveClientGen
+        var _rev = root.toplevelRevision
+        if (!root.tipItem) return 0
+        return root.itemRunningCount(root.tipItem, root.tipItemScreen, _gen)
+      }
+      width: tipLabel.implicitWidth + (tipCountLabel.visible ? tipCountLabel.implicitWidth + Style.space(6) : 0) + tipPadX
+      height: Math.max(Style.space(28), Math.max(tipLabel.implicitHeight, tipCountLabel.implicitHeight) + tipPadY)
       radius: Style.cornerRadius
       color: Color.tooltip.background
       border.color: Color.tooltip.border
       border.width: Math.max(1, Style.normalBorderWidth)
       x: {
-        if (root.barEdgeDragging)
-          return Math.min(Math.max(Style.space(4), root.tipX), parent.width - width - Style.space(4))
-        if (root.barEdge === "left")
-          return root.dockHeight + Style.space(10)
-        if (root.barEdge === "right")
-          return Math.max(Style.space(4), parent.width - root.dockHeight - width - Style.space(10))
-        return Math.min(Math.max(Style.space(4), root.tipX), parent.width - width - Style.space(4))
+        var left = root.tipX - width / 2
+        if (!root.barEdgeDragging && tipWindow.tipMetrics.barEdge === "left")
+          left = tipWindow.tipMetrics.barCross + Style.space(10)
+        else if (!root.barEdgeDragging && tipWindow.tipMetrics.barEdge === "right")
+          left = parent.width - tipWindow.tipMetrics.barCross - width - Style.space(10)
+        return Math.min(Math.max(Style.space(4), left), parent.width - width - Style.space(4))
       }
       y: {
-        if (root.barEdgeDragging)
-          return Math.min(Math.max(Style.space(4), root.tipY - height - Style.space(8)), parent.height - height - Style.space(4))
-        if (root.barEdge === "bottom")
-          return parent.height - root.dockHeight - height - Style.space(10)
-        return Math.min(Math.max(Style.space(4), root.tipY - height / 2), parent.height - height - Style.space(4))
+        var top = root.tipY - height - Style.space(8)
+        if (!root.barEdgeDragging && tipWindow.tipMetrics.barEdge !== "bottom")
+          top = root.tipY - height / 2
+        return Math.min(Math.max(Style.space(4), top), parent.height - height - Style.space(4))
       }
 
-      Text {
-        id: tipLabel
+      Row {
         anchors.centerIn: parent
-        textFormat: Text.PlainText
-        text: root.tipText
-        color: Color.tooltip.text
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        verticalAlignment: Text.AlignVCenter
-        horizontalAlignment: Text.AlignHCenter
+        spacing: Style.space(6)
+
+        Text {
+          id: tipLabel
+          textFormat: Text.PlainText
+          text: root.tipText
+          color: Color.tooltip.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          verticalAlignment: Text.AlignVCenter
+        }
+
+        Text {
+          id: tipCountLabel
+          visible: tipCard.tipCount > 0
+          textFormat: Text.PlainText
+          text: "(" + tipCard.tipCount + ")"
+          color: Color.tooltip.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          verticalAlignment: Text.AlignVCenter
+        }
       }
     }
   }
@@ -2565,30 +3954,102 @@ Item {
     }
   }
 
+  // Help lines are word pieces so a match can sit on a real yellow rectangle.
+  // Text background-color is not painted by this shell.
+  component HelpMarkText: Item {
+    id: markHost
+    property string source: ""
+    property var segments: []
+    property color textColor: root.menuForeground
+    property int pixelSize: Style.font.body
+    property bool boldText: false
+    property real padTop: 0
+    property int hitCursorStart: -1
+    implicitWidth: flow.implicitWidth
+    implicitHeight: flow.implicitHeight + padTop
+    height: implicitHeight
+
+    function yOfStart(start) {
+      for (var i = 0; i < segRepeater.count; i++) {
+        var piece = segRepeater.itemAt(i)
+        if (piece && piece.segStart === start)
+          return padTop + piece.y
+      }
+      return padTop
+    }
+
+    Flow {
+      id: flow
+      y: markHost.padTop
+      width: markHost.width
+      spacing: 0
+
+      Repeater {
+        id: segRepeater
+        model: markHost.segments ? markHost.segments.length : 0
+        delegate: Item {
+          required property int index
+          readonly property var seg: markHost.segments[index]
+          property int segStart: seg ? seg.start : -1
+          width: label.implicitWidth
+          height: Math.max(label.implicitHeight, markHost.pixelSize + 4)
+
+          Rectangle {
+            anchors.fill: parent
+            anchors.topMargin: 1
+            anchors.bottomMargin: 1
+            visible: !!(seg && seg.hit)
+            radius: 3
+            color: "#FFE56A"
+          }
+
+          Text {
+            id: label
+            anchors.verticalCenter: parent.verticalCenter
+            text: seg ? seg.text : ""
+            textFormat: Text.PlainText
+            color: markHost.textColor
+            font.family: Style.font.menuFamily
+            font.pixelSize: markHost.pixelSize
+            font.bold: seg ? !!seg.bold : markHost.boldText
+          }
+        }
+      }
+    }
+  }
+
   component MenuPanel: PanelWindow {
     id: menuWindow
     readonly property bool forScreen: root.menuScreen === menuWindow.screen
     readonly property bool itemMenuActive: visible && !!root.menuItem
     readonly property bool titleEditActive: itemMenuActive && root.labelEdit
+    readonly property bool barHelpKeys: visible && root.helpOpen && !root.menuItem
     visible: root.menuOpen && forScreen
-    focusable: titleEditActive
+    focusable: titleEditActive || barHelpKeys
     exclusionMode: ExclusionMode.Ignore
     color: "transparent"
     surfaceFormat.opaque: false
     WlrLayershell.namespace: "drace3000-bottom-dock-menu"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: titleEditActive ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    WlrLayershell.keyboardFocus: (titleEditActive || barHelpKeys) ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    readonly property var menuLook: {
+      var _looks = root.workspaceLooks
+      var _def = root.defaultLook
+      return root.lookFor(root.workspaceIdForScreen(menuWindow.screen))
+    }
+    readonly property var menuMetrics: root.metricsForLook(menuLook)
     anchors { left: true; right: true; top: true; bottom: true }
     // Leave the dock strip uncovered so icon size, transparency, and
     // background picks stay visible while this menu is open.
-    margins.left: root.barEdge === "left" ? root.dockHeight : 0
-    margins.right: root.barEdge === "right" ? root.dockHeight : 0
-    margins.bottom: root.barEdge === "bottom" ? root.dockHeight : 0
+    margins.left: menuMetrics.barEdge === "left" ? menuMetrics.barCross : 0
+    margins.right: menuMetrics.barEdge === "right" ? menuMetrics.barCross : 0
+    margins.bottom: menuMetrics.barEdge === "bottom" ? menuMetrics.barCross : 0
 
     HyprlandFocusGrab {
-      active: menuWindow.titleEditActive
+      active: menuWindow.titleEditActive || menuWindow.barHelpKeys
       windows: [menuWindow]
     }
+    onBarHelpKeysChanged: if (barHelpKeys) Qt.callLater(function() { helpKeyCatcher.forceActiveFocus() })
 
     Rectangle {
       anchors.fill: parent
@@ -2609,11 +4070,21 @@ Item {
       borderSpec: root.menuBorderSpec
       padding: Style.space(6)
       x: {
-        var origin = root.barEdge === "left" ? root.dockHeight : 0
-        var local = root.menuX - origin
-        return Math.min(Math.max(Style.space(8), local - width / 2), parent.width - width - Style.space(8))
+        var margin = Style.space(8)
+        var left = root.menuX - width / 2
+        if (menuWindow.menuMetrics.barEdge === "left")
+          left = root.menuX + Style.space(8) - menuWindow.menuMetrics.barCross
+        else if (menuWindow.menuMetrics.barEdge === "right")
+          left = root.menuX - width - Style.space(8)
+        return Math.min(Math.max(margin, left), parent.width - width - margin)
       }
-      y: Math.max(Style.space(8), parent.height - height - Style.space(12))
+      y: {
+        var margin = Style.space(8)
+        var top = root.menuY - height - Style.space(10)
+        if (menuWindow.menuMetrics.barEdge !== "bottom")
+          top = root.menuY - height / 2
+        return Math.min(Math.max(margin, top), parent.height - height - margin)
+      }
 
       Column {
         id: menuColumn
@@ -2671,13 +4142,33 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: root.menuItem && root.menuItem.kind === "keybind" ? parent.left : itemMenuHeaderIcon.right
             anchors.leftMargin: Style.space(8)
-            anchors.right: itemMenuInfo.left
-            anchors.rightMargin: Style.space(8)
+            width: {
+              var limit = itemMenuInfo.x - x - Style.space(8)
+              var countW = itemMenuCount.visible ? itemMenuCount.implicitWidth + Style.space(6) : 0
+              return Math.min(implicitWidth, Math.max(0, limit - countW))
+            }
             elide: Text.ElideRight
             textFormat: Text.PlainText
             text: root.menuItem && root.menuItem.kind === "keybind"
               ? "KEYBIND"
               : (root.menuItem ? DockModel.itemLabel(root.menuItem) : "")
+            color: root.menuForeground
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Text {
+            id: itemMenuCount
+            visible: itemMenuHeaderLabel.visible && itemMenuCountValue > 0
+            readonly property int itemMenuCountValue: root.menuItem
+              ? root.itemRunningCount(root.menuItem, menuWindow.screen, root.liveClientGen)
+              : 0
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: itemMenuHeaderLabel.right
+            anchors.leftMargin: Style.space(6)
+            textFormat: Text.PlainText
+            text: "(" + itemMenuCountValue + ")"
             color: root.menuForeground
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.body
@@ -2854,11 +4345,7 @@ Item {
               spacing: Style.space(16)
 
               Repeater {
-                model: [
-                  { label: "Left", value: "left" },
-                  { label: "Center", value: "center" },
-                  { label: "Right", value: "right" }
-                ]
+                model: root.sectionChoices
                 delegate: Item {
                   required property var modelData
                   readonly property bool selected: root.pendingSection === modelData.value
@@ -2949,6 +4436,16 @@ Item {
               fontFamily: Style.font.menuFamily
               onClicked: root.bumpIconSize(-4)
             }
+            Text {
+              width: Style.space(44) + 15
+              leftPadding: 15
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: DockModel.iconSizePercent(root.iconSize) + "%"
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall + 3
+            }
           }
 
           Row {
@@ -2980,6 +4477,16 @@ Item {
               accent: Color.accent
               fontFamily: Style.font.menuFamily
               onClicked: root.bumpBgOpacity(10)
+            }
+            Text {
+              width: Style.space(44) + 15
+              leftPadding: 15
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: DockModel.transparencyPercent(root.bgOpacity) + "%"
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall + 3
             }
           }
 
@@ -3020,14 +4527,134 @@ Item {
             }
           }
 
-          Toggle {
+          StatusToggle {
             width: parent.width
             label: "Icon popups"
             checked: root.showTips
-            foreground: root.menuForeground
-            accent: Color.accent
-            fontFamily: Style.font.menuFamily
             onClicked: root.toggleShowTips()
+          }
+
+          StatusToggle {
+            width: parent.width
+            label: "Auto hide task bar"
+            checked: root.autoHide
+            onClicked: root.toggleAutoHide()
+          }
+
+          StatusToggle {
+            width: parent.width
+            label: "Global Changes"
+            checked: root.globalChanges
+            onClicked: root.toggleGlobalChanges()
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Text {
+              width: Style.space(92)
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "Sections"
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+            Repeater {
+              model: root.sectionChoices
+              delegate: Button {
+                required property var modelData
+                text: modelData.label
+                bordered: true
+                selected: root.removeSectionPick === modelData.value
+                foreground: root.menuForeground
+                accent: Color.accent
+                fontFamily: Style.font.menuFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: 0
+                verticalPadding: 0
+                width: Style.space(28)
+                height: width
+                radius: width / 2
+                onClicked: root.toggleSectionPick(modelData.value)
+              }
+            }
+            Button {
+              text: "+"
+              bordered: true
+              foreground: root.menuForeground
+              accent: Color.accent
+              fontFamily: Style.font.menuFamily
+              horizontalPadding: 0
+              verticalPadding: 0
+              width: Style.space(28)
+              height: width
+              radius: width / 2
+              enabled: DockModel.groupCount(root.layout) < DockModel.maxSections()
+              onClicked: root.addUserSection()
+            }
+            Button {
+              text: "−"
+              bordered: true
+              foreground: root.menuForeground
+              accent: Color.accent
+              fontFamily: Style.font.menuFamily
+              horizontalPadding: 0
+              verticalPadding: 0
+              width: Style.space(28)
+              height: width
+              radius: width / 2
+              enabled: root.removeSectionPick >= 0
+              opacity: enabled ? 1 : 0.35
+              onClicked: root.askRemoveSection(root.removeSectionPick)
+            }
+          }
+
+          MenuRow {
+            visible: !root.menuItem && root.menuSectionIndex >= 0
+            text: "Remove section " + (root.menuSectionIndex + 1)
+            onActivated: root.askRemoveSection(root.menuSectionIndex)
+          }
+
+          Column {
+            visible: root.confirmRemoveOpen && !root.menuItem
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              text: "You about to remove section " + (root.confirmSectionIndex + 1)
+                    + " from Workspace " + root.workspaceId
+                    + " and all of its icon contents. To keep any icons move them to other sections first or they will be removed"
+                    + (root.globalChanges ? " The same section will be removed on every workspace." : "")
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                text: "Cancel"
+                bordered: true
+                foreground: root.menuForeground
+                accent: Color.accent
+                fontFamily: Style.font.menuFamily
+                onClicked: root.cancelRemoveSection()
+              }
+              Button {
+                text: "Remove All"
+                bordered: true
+                foreground: root.menuForeground
+                accent: Color.accent
+                fontFamily: Style.font.menuFamily
+                onClicked: root.commitRemoveSection()
+              }
+            }
           }
         }
 
@@ -3360,7 +4987,7 @@ Item {
             root.menuItem = null
             root.labelDraft = ""
             root.labelEdit = false
-            root.persistLayout(DockModel.removeItem(root.layout, id))
+            root.commitLayout(function(current) { return DockModel.removeItem(current, id) })
             root.closeMenus()
           }
         }
@@ -3403,10 +5030,231 @@ Item {
         readonly property int cardWidth: Math.min(Style.space(440), parent.width - Style.space(32))
         readonly property int sectionGap: Style.space(8)
         readonly property int maxBody: Math.max(Style.space(140), menuCard.y - Style.space(96))
+        // Half of the full task-bar card, leaving room for the title and carets.
+        readonly property int barHelpBody: {
+          var chrome = contentTopInset + helpTitleRow.height + sectionGap + helpSearchRow.height + sectionGap + Style.space(4) + helpCarets.height + contentBottomInset
+          var full = chrome + helpColumn.implicitHeight
+          return Math.max(Style.space(80), Math.round(full * 0.5) - chrome)
+        }
+        property bool helpSearchMiss: false
+        // Set when the spyglass (or Enter) commits a search. Empty clears the marks.
+        property string helpQuery: ""
+        property var helpHits: []
+        property int helpHitCursor: 0
+        property int helpLayoutTick: 0
+        property int helpSearchToken: 0
+
         readonly property bool barHelp: !root.menuItem
         readonly property bool keybindHelp: !!root.menuItem && root.menuItem.kind === "keybind"
+        readonly property string purposeCopy: keybindHelp
+          ? "A Keybind button icon runs one shortcut for the Super+K list. This popup allows the editing of text inside the button and the associated mouse over tooltip. It also helps with desired placement and the workspaces you would like it to appear in. Desired placement can be furthered by dragging and dropping the icon in the task bar itself."
+          : barHelp
+            ? "Open task bar customization from the gear, or by right-clicking a blank part of the bar. Add icons, choose how many sections this workspace has, and change how the bar looks. Each workspace keeps its own icons, sections, and widths. Global Changes makes the next edit apply to every workspace. Dragging a separator does not."
+            : "Keeps the apps, plugins, and web links you use on a bar along one edge of the screen. Each workspace keeps its own icons, and each monitor shows the workspace on that screen."
+
+        function plainText(html) {
+          var source = String(html || "")
+          var plain = ""
+          var inTag = false
+          for (var i = 0; i < source.length; i++) {
+            var ch = source.charAt(i)
+            if (ch === "<") { inTag = true; continue }
+            if (inTag) {
+              if (ch === ">") inTag = false
+              continue
+            }
+            plain += ch
+          }
+          return plain
+        }
+
+        function collectHits(query) {
+          var q = String(query || "").toLowerCase()
+          var hits = []
+          if (!q.length) return hits
+          function add(kind, feature, source) {
+            var plain = plainText(source).toLowerCase()
+            var from = 0
+            while (from <= plain.length - q.length) {
+              var at = plain.indexOf(q, from)
+              if (at < 0) break
+              hits.push({ kind: kind, feature: feature, start: at, length: q.length })
+              from = at + q.length
+            }
+          }
+          if (helpPurposeLabel.visible)
+            add(0, -1, "PURPOSE")
+          add(1, -1, purposeCopy)
+          add(2, -1, "FEATURES")
+          var count = helpFeatureRepeater.count
+          for (var i = 0; i < count; i++) {
+            var node = helpFeatureRepeater.itemAt(i)
+            if (!node) continue
+            add(3, i, String(node.modelData || ""))
+          }
+          return hits
+        }
+
+        // Word pieces. A match is its own piece so a yellow rectangle can sit behind it.
+        function segmentsFor(html, query, forceBold) {
+          var source = String(html || "")
+          var chars = ""
+          var bold = []
+          var depth = 0
+          var inTag = false
+          var tag = ""
+          for (var i = 0; i < source.length; i++) {
+            var ch = source.charAt(i)
+            if (ch === "<") { inTag = true; tag = ""; continue }
+            if (inTag) {
+              if (ch === ">") {
+                inTag = false
+                var name = tag.toLowerCase().replace(/^\//, "")
+                var closing = tag.charAt(0) === "/"
+                if (name === "b" || name === "strong")
+                  depth = closing ? Math.max(0, depth - 1) : depth + 1
+              } else {
+                tag += ch
+              }
+              continue
+            }
+            chars += ch
+            bold.push(forceBold || depth > 0)
+          }
+          var q = String(query || "").toLowerCase()
+          var lower = chars.toLowerCase()
+          var hit = []
+          for (var n = 0; n < chars.length; n++) hit.push(false)
+          if (q.length) {
+            var from = 0
+            while (from <= lower.length - q.length) {
+              var at = lower.indexOf(q, from)
+              if (at < 0) break
+              for (var j = at; j < at + q.length; j++) hit[j] = true
+              from = at + q.length
+            }
+          }
+          var segs = []
+          var buf = ""
+          var bufBold = false
+          var bufHit = false
+          var bufStart = 0
+          function push() {
+            if (!buf.length) return
+            segs.push({ text: buf, bold: bufBold, hit: bufHit, start: bufStart })
+            buf = ""
+          }
+          for (var c = 0; c < chars.length; c++) {
+            var glyph = chars.charAt(c)
+            var nextBold = bold[c]
+            var nextHit = hit[c]
+            var broke = buf.length > 0 && (nextBold !== bufBold || nextHit !== bufHit || buf.charAt(buf.length - 1) === " ")
+            if (broke) {
+              push()
+              buf = glyph
+              bufBold = nextBold
+              bufHit = nextHit
+              bufStart = c
+            } else if (!buf.length) {
+              buf = glyph
+              bufBold = nextBold
+              bufHit = nextHit
+              bufStart = c
+            } else {
+              buf += glyph
+            }
+          }
+          push()
+          return segs
+        }
+
+        function cursorStartFor(kind, feature) {
+          if (!helpQuery.length || !helpHits || !helpHits.length) return -1
+          var hit = helpHits[helpHitCursor]
+          if (!hit || hit.kind !== kind) return -1
+          if (kind === 3 && hit.feature !== feature) return -1
+          return hit.start
+        }
+
+        function clearHelpSearch() {
+          helpSearchInput.text = ""
+          helpQuery = ""
+          helpHits = []
+          helpHitCursor = 0
+          helpSearchMiss = false
+          helpSearchToken += 1
+          helpLayoutTick += 1
+        }
+
+        function contentYOf(item) {
+          var y = 0
+          var node = item
+          while (node && node !== helpColumn) {
+            y += node.y
+            node = node.parent
+          }
+          return y
+        }
+
+        function hitBlock(hit) {
+          if (!hit) return null
+          if (hit.kind === 0) return helpPurposeLabel
+          if (hit.kind === 1) return helpPurpose
+          if (hit.kind === 2) return helpFeaturesLabel
+          var row = helpFeatureRepeater.itemAt(hit.feature)
+          return row ? row.featureMark : null
+        }
+
+        function scrollToHit() {
+          if (!helpHits || !helpHits.length) return
+          var hit = helpHits[helpHitCursor]
+          var block = hitBlock(hit)
+          if (!block || !block.yOfStart) return
+          var y = contentYOf(block) + block.yOfStart(hit.start)
+          helpFlick.reveal(Math.max(0, y - Style.space(8)))
+        }
+
+        function nextHelpHit() {
+          if (!helpHits || !helpHits.length) return
+          helpHitCursor = (helpHitCursor + 1) % helpHits.length
+          helpLayoutTick += 1
+          var token = ++helpSearchToken
+          helpHitScroll.token = token
+          helpHitScroll.restart()
+        }
+
+        function jumpToHelp(raw) {
+          var query = String(raw || "").trim()
+          if (!query.length) {
+            helpQuery = ""
+            helpHits = []
+            helpHitCursor = 0
+            helpSearchMiss = false
+            helpSearchToken += 1
+            helpLayoutTick += 1
+            return
+          }
+          var hits = collectHits(query)
+          if (!hits.length) {
+            helpQuery = ""
+            helpHits = []
+            helpHitCursor = 0
+            helpSearchInput.text = ""
+            helpSearchMiss = true
+            helpSearchToken += 1
+            helpLayoutTick += 1
+            return
+          }
+          helpSearchMiss = false
+          helpHitCursor = 0
+          helpHits = hits
+          helpQuery = query
+          var token = ++helpSearchToken
+          helpHitScroll.token = token
+          helpHitScroll.restart()
+        }
         width: cardWidth
-        height: contentTopInset + helpTitleRow.height + sectionGap + helpFlick.height + contentBottomInset
+        height: contentTopInset + helpTitleRow.height + sectionGap + helpSearchRow.height + sectionGap + helpFlick.height + Style.space(4) + helpCarets.height + contentBottomInset
         radius: Style.cornerRadius
         color: root.menuBackground
         borderSpec: root.menuBorderSpec
@@ -3433,6 +5281,19 @@ Item {
           z: 0
         }
 
+        // Wait until the marked text has been laid out, then scroll to the first hit.
+        Timer {
+          id: helpHitScroll
+          interval: 48
+          repeat: false
+          property int token: 0
+          onTriggered: {
+            if (token !== helpCard.helpSearchToken) return
+            helpCard.helpLayoutTick += 1
+            helpCard.scrollToHit()
+          }
+        }
+
         Item {
           id: helpTitleRow
           z: 1
@@ -3444,9 +5305,25 @@ Item {
           anchors.topMargin: helpCard.contentTopInset
           height: Math.max(Style.space(28), helpClose.height)
 
-          Text {
+          Image {
+            id: helpTitleIcon
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: parent.left
+            width: Style.space(18)
+            height: width
+            source: root.iconSource(helpCard.keybindHelp
+              ? "input-keyboard-symbolic"
+              : (helpCard.barHelp ? "preferences-system" : "view-app-grid-symbolic"))
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            sourceSize.width: width
+            sourceSize.height: height
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: helpTitleIcon.right
+            anchors.leftMargin: Style.space(8)
             anchors.right: helpClose.left
             anchors.rightMargin: Style.space(8)
             elide: Text.ElideRight
@@ -3467,104 +5344,328 @@ Item {
           }
         }
 
+        Row {
+          id: helpSearchRow
+          z: 2
+          anchors.left: helpTitleRow.left
+          anchors.right: helpTitleRow.right
+          anchors.top: helpTitleRow.bottom
+          anchors.topMargin: helpCard.sectionGap
+          height: Style.space(32)
+          spacing: Style.space(6)
+
+          Rectangle {
+            id: helpSearchField
+            readonly property bool showClear: helpSearchInput.text.length > 0 || helpCard.helpQuery.length > 0 || helpCard.helpSearchMiss
+            readonly property real clearRoom: showClear ? helpSearchClear.width + Style.space(8) : Style.space(8)
+            width: parent.width - helpSearchButton.width - helpNextButton.width - parent.spacing * 2
+            height: parent.height
+            radius: height / 2
+            color: root.menuBackground
+            border.color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.45)
+            border.width: Math.max(1, Style.normalBorderWidth)
+
+            Text {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(12)
+              anchors.rightMargin: helpSearchField.clearRoom
+              visible: helpSearchInput.text.length === 0
+              textFormat: Text.PlainText
+              text: helpCard.helpSearchMiss ? "Nothing found..." : "Enter search text..."
+              color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.45)
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            TextInput {
+              id: helpSearchInput
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(12)
+              anchors.rightMargin: helpSearchField.clearRoom
+              verticalAlignment: Text.AlignVCenter
+              color: root.menuForeground
+              selectionColor: root.menuSelectedText
+              selectedTextColor: root.menuBackground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+              clip: true
+              onTextEdited: {
+                helpCard.helpSearchMiss = false
+                helpCard.helpQuery = ""
+                helpCard.helpHits = []
+                helpCard.helpHitCursor = 0
+                helpCard.helpSearchToken += 1
+                helpCard.helpLayoutTick += 1
+              }
+              Keys.onReturnPressed: helpCard.jumpToHelp(text)
+              Keys.onEnterPressed: helpCard.jumpToHelp(text)
+            }
+
+            CircleGlyphButton {
+              id: helpSearchClear
+              z: 2
+              visible: helpSearchField.showClear
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(3)
+              width: parent.height - Style.space(6)
+              glyph: "X"
+              onActivated: helpCard.clearHelpSearch()
+            }
+          }
+
+          Rectangle {
+            id: helpSearchButton
+            width: height
+            height: parent.height
+            radius: width / 2
+            color: helpSearchMouse.containsMouse ? root.menuFillHover : "transparent"
+            border.color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.45)
+            border.width: Math.max(1, Style.normalBorderWidth)
+
+            Canvas {
+              anchors.centerIn: parent
+              width: Style.space(16)
+              height: width
+              onPaint: {
+                var ctx = getContext("2d")
+                var s = width
+                ctx.clearRect(0, 0, s, s)
+                ctx.strokeStyle = root.menuForeground
+                ctx.fillStyle = root.menuForeground
+                ctx.lineWidth = Math.max(1.6, s * 0.12)
+                ctx.beginPath()
+                ctx.arc(s * 0.40, s * 0.40, s * 0.26, 0, Math.PI * 2)
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.moveTo(s * 0.58, s * 0.58)
+                ctx.lineTo(s * 0.90, s * 0.90)
+                ctx.stroke()
+              }
+            }
+
+            MouseArea {
+              id: helpSearchMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: helpCard.jumpToHelp(helpSearchInput.text)
+            }
+          }
+
+          Rectangle {
+            id: helpNextButton
+            readonly property bool canNext: helpCard.helpHits && helpCard.helpHits.length > 0
+            width: height
+            height: parent.height
+            radius: width / 2
+            opacity: canNext ? 1 : 0.32
+            color: helpNextMouse.containsMouse && canNext ? root.menuFillHover : "transparent"
+            border.color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.45)
+            border.width: Math.max(1, Style.normalBorderWidth)
+
+            Text {
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              text: "↓"
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            MouseArea {
+              id: helpNextMouse
+              anchors.fill: parent
+              hoverEnabled: helpNextButton.canNext
+              enabled: helpNextButton.canNext
+              cursorShape: helpNextButton.canNext ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: helpCard.nextHelpHit()
+            }
+          }
+        }
+
+        // Marks the edge where scrolling text passes under the title.
+        Rectangle {
+          z: 3
+          anchors.left: helpFlick.left
+          anchors.right: helpFlick.right
+          anchors.top: helpFlick.top
+          height: 1
+          color: Qt.rgba(root.menuForeground.r, root.menuForeground.g, root.menuForeground.b, 0.45)
+        }
+
         Flickable {
           id: helpFlick
           z: 1
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.top: helpTitleRow.bottom
+          anchors.top: helpSearchRow.bottom
           anchors.leftMargin: helpCard.contentLeftInset
           anchors.rightMargin: helpCard.contentRightInset
           anchors.topMargin: helpCard.sectionGap
           height: helpCard.barHelp
-            ? helpColumn.implicitHeight
+            ? helpCard.barHelpBody
             : Math.min(helpColumn.implicitHeight, helpCard.maxBody)
           contentWidth: width
           contentHeight: helpColumn.implicitHeight
-          clip: !helpCard.barHelp
+          clip: contentHeight > height + 1
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
-          interactive: !helpCard.barHelp && contentHeight > height + 1
+          interactive: contentHeight > height + 1
+
+          function scrollBy(delta) {
+            var maxY = Math.max(0, contentHeight - height)
+            contentY = Math.max(0, Math.min(maxY, contentY + delta))
+          }
+
+          function reveal(y) {
+            var maxY = Math.max(0, contentHeight - height)
+            contentY = Math.max(0, Math.min(maxY, y))
+          }
+
+          Item {
+            id: helpKeyCatcher
+            width: 0
+            height: 0
+            focus: helpCard.barHelp && root.helpOpen
+            Keys.onPressed: function(event) {
+              if (!helpCard.barHelp || !helpFlick.interactive) return
+              var step = Math.max(28, Math.round(helpFlick.height * 0.28))
+              var page = Math.max(step, helpFlick.height - Style.space(16))
+              if (event.key === Qt.Key_Down || event.key === Qt.Key_Right) {
+                helpFlick.scrollBy(step)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Left) {
+                helpFlick.scrollBy(-step)
+                event.accepted = true
+              } else if (event.key === Qt.Key_PageDown) {
+                helpFlick.scrollBy(page)
+                event.accepted = true
+              } else if (event.key === Qt.Key_PageUp) {
+                helpFlick.scrollBy(-page)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Home) {
+                helpFlick.contentY = 0
+                event.accepted = true
+              } else if (event.key === Qt.Key_End) {
+                helpFlick.contentY = Math.max(0, helpFlick.contentHeight - helpFlick.height)
+                event.accepted = true
+              }
+            }
+          }
+
+          Connections {
+            target: root
+            function onHelpOpenChanged() {
+              helpCard.clearHelpSearch()
+              if (!root.helpOpen) return
+              helpFlick.contentY = 0
+              if (helpCard.barHelp)
+                Qt.callLater(function() { helpKeyCatcher.forceActiveFocus() })
+            }
+          }
 
           Column {
             id: helpColumn
             width: helpFlick.width
             spacing: Style.space(8)
 
-            PanelSectionHeader {
-              text: "PURPOSE"
-              foreground: root.menuForeground
-              fontFamily: Style.font.menuFamily
-            }
-
-            Text {
+            HelpMarkText {
+              id: helpPurposeLabel
+              visible: !helpCard.keybindHelp
               width: parent.width
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
-              text: helpCard.keybindHelp
-                ? "This icon runs one shortcut from the Super+K list. KEYBIND is the title of this menu. The mark and description under it name the shortcut, and the line under those is the keystroke."
-                : helpCard.barHelp
-                  ? "Right-click a blank part of the task bar to open task bar customization. Use it to add icons, including a keybind, and to change how the task bar looks. Each workspace keeps its own icons."
-                  : "Keeps the apps, plugins, and web links you use on a bar along one edge of the screen. Each workspace keeps its own icons, and each monitor shows the workspace on that screen."
-              color: root.menuForeground
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.body
+              source: "PURPOSE"
+              textColor: Qt.darker(root.menuForeground, 1.4)
+              pixelSize: Style.font.caption
+              boldText: true
+              padTop: Math.ceil(Style.font.caption * 0.15)
+              segments: helpCard.segmentsFor(source, helpCard.helpQuery, true)
+              hitCursorStart: helpCard.cursorStartFor(0, -1)
             }
 
-            PanelSectionHeader {
-              text: "FEATURES"
-              foreground: root.menuForeground
-              fontFamily: Style.font.menuFamily
+            HelpMarkText {
+              id: helpPurpose
+              width: parent.width
+              source: helpCard.purposeCopy
+              segments: helpCard.segmentsFor(source, helpCard.helpQuery, false)
+              hitCursorStart: helpCard.cursorStartFor(1, -1)
+            }
+
+            HelpMarkText {
+              id: helpFeaturesLabel
+              width: parent.width
+              source: "FEATURES"
+              textColor: Qt.darker(root.menuForeground, 1.4)
+              pixelSize: Style.font.caption
+              boldText: true
+              padTop: Math.ceil(Style.font.caption * 0.15)
+              segments: helpCard.segmentsFor(source, helpCard.helpQuery, true)
+              hitCursorStart: helpCard.cursorStartFor(2, -1)
             }
 
             Column {
+              id: helpFeatures
               width: parent.width
               spacing: Style.space(6)
 
               Repeater {
+                id: helpFeatureRepeater
                 model: helpCard.keybindHelp ? [
-                  "Left-click the icon to run the shortcut, the same action as choosing it in the Super+K list.",
-                  "Hover the icon to see the description. The popup shows that name, not the keystroke.",
-                  "The letters to the left of the description are the mark on the bar icon. Double-click those letters to change them. Up to three characters.",
-                  "Double-click the description to rename it. That name is what you see when you hover the icon.",
-                  "The line under the description is the keystroke combination.",
-                  "Place chooses Left, Center, or Right for this icon.",
-                  "Check a workspace to show this icon there. Uncheck to remove that copy.",
-                  "Drag the icon and drop it to move it along the bar.",
-                  "Remove takes this icon off the current workspace.",
-                  "The circled i opens this help. The circled X closes the menu."
+                  "<b>Left-click</b> the icon to run the shortcut, the same action as choosing it in the Super+K list.",
+                  "<b>Hover</b> the icon to see the description. The popup shows that name, not the keystroke.",
+                  "The letters to the left of the description are the <b>mark</b> on the bar icon. Double-click those letters to change them. Up to three characters.",
+                  "<b>Double-click the description</b> to rename it. That name is what you see when you hover the icon.",
+                  "The line under the description is the <b>keystroke combination</b>.",
+                  "<b>Place</b> chooses Left, Center, or Right for this icon.",
+                  "Check a <b>workspace</b> to show this icon there. Uncheck to remove that copy.",
+                  "<b>Drag</b> the icon and drop it to move it along the bar.",
+                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on, it comes off every workspace.",
+                  "The <b>circled i</b> opens this help. The <b>circled X</b> closes the menu."
                 ] : helpCard.barHelp ? [
-                  "App adds a program. Plugin adds a shell plugin. Web adds a link.",
-                  "KeyBind adds a shortcut from the Super+K list. The task bar icon shows up to three letters from that shortcut name. Hover shows the name. Left-click runs the shortcut.",
-                  "Left, Center, or Right chooses which group the new item joins.",
-                  "Icon Size + makes icons larger. Icon Size - makes them smaller. Scroll on the task bar does the same.",
-                  "Transparency + makes the task bar more see-through. Transparency - makes it more solid. Hold Alt and scroll to do the same.",
-                  "A background swatch sets the task bar color. Theme follows the current Omarchy theme.",
-                  "Icon popups shows a name when you hover an icon, and RClick customize on a blank part of the task bar.",
-                  "Left-click an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut.",
-                  "Click an icon, then drag and drop it to reposition it along the task bar, including into Left, Center, or Right.",
-                  "Hold Super and drag a blank part of the task bar to the left, the right, or the bottom to move the task bar there.",
-                  "The task bar hides until the pointer reaches its edge. It stays open while the pointer is off the outer side of the screen.",
-                  "A mark under an app means it is open. A wider mark means that window is focused."
+                  "<b>App</b> adds a program. <b>Plugin</b> adds a shell plugin. <b>Web</b> adds a link. The numbers under those buttons choose which section receives the new icon.",
+                  "<b>KeyBind</b> adds a shortcut from the Super+K list. The task bar icon shows up to three letters from that shortcut name. Hover shows the name. Left-click runs the shortcut.",
+                  "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> adds an empty section at the end. A workspace can also have none.",
+                  "Click a section <b>number</b> to press it in. Click it again to release it. <b>−</b>, to the right of <b>+</b>, stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
+                  "An <b>empty section</b> is removed at once. A section that still has icons asks first. <b>Cancel</b> keeps it. <b>Remove All</b> deletes the section and those icons.",
+                  "Drag a <b>separator</b> to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. The resize cursor shows while the pointer is over the line. The section moves only while <b>Super</b> is held or the mouse button is down. Releasing both stops the move. A section will not shrink smaller than its icons. This drag stays on the workspace you are changing, even when Global Changes is on.",
+                  "<b>Icon Size +</b> makes icons larger. <b>Icon Size −</b> makes them smaller. <b>Scroll</b> on the task bar does the same. Section widths scale with the icon size.",
+                  "<b>Transparency +</b> makes the task bar more see-through. <b>Transparency −</b> makes it more solid. Hold <b>Alt and scroll</b> to do the same.",
+                  "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme.",
+                  "<b>Icon popups</b> shows a name when you hover an icon. If that icon has a blinking underline, the popup also shows <b>(x)</b> to the right of the name, where x is how many of that item are open on this workspace.",
+                  "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut.",
+                  "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section.",
+                  "Hold <b>Super and drag</b> a blank part of the task bar to the left, the right, or the bottom to move the task bar there.",
+                  "<b>Global Changes</b>, when on, applies the next edit to every workspace: icons added, moved, or removed, and the bar's edge, size, color, popups, and auto-hide. Adding or moving an icon into a section number that another workspace does not have yet adds empty sections there until that number exists. When off, the edit stays on the workspace you are changing.",
+                  "The <b>globe</b> after the last section is that same switch. Neon green is on. Neon red is off. It is shared by every workspace and cannot be moved or removed.",
+                  "The <b>gear</b> to the right of the globe opens this settings menu, the same as a right-click on a blank part of the bar. It cannot be moved or removed.",
+                  "<b>Auto hide task bar</b> hides the bar until the pointer reaches its edge. It stays open while the pointer is on the bar.",
+                  "A <b>blinking underline</b> under an icon means that item is open on this workspace."
                 ] : [
-                  "Left-click an icon to open another window on this workspace.",
-                  "Left-click a plugin to toggle it. Left-click a web link to open it.",
-                  "Hover an icon to see its name. Hover a blank part of the bar to see how to customize. Turn those popups off from the bar menu.",
-                  "Double-click the name at the top of this menu to rename the icon.",
-                  "Click an icon, then drag and drop it to reposition it along the bar, including into Left, Center, or Right.",
-                  "Place sets Left, Center, or Right for this icon.",
-                  "Check a workspace to copy this icon there. Uncheck to remove that copy.",
-                  "Remove takes this icon off the current workspace only.",
-                  "Right-click the empty bar to add an app, plugin, or web link.",
-                  "From the empty bar, change icon size, transparency, and the bar color.",
-                  "Scroll on the bar to resize icons. Hold Alt and scroll to change transparency.",
-                  "A mark under an app means it is open. A wider mark means that window is focused.",
-                  "The bar slides away until the pointer reaches the bottom edge.",
-                  "Hold Super and drag this card to move it. It stays where you drop it until you log out.",
-                  "Hold Super and drag a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom."
+                  "<b>Left-click an icon</b> to open another window on this workspace.",
+                  "<b>Left-click a plugin</b> to toggle it. <b>Left-click a web link</b> to open it.",
+                  "<b>Hover an icon</b> to see its name. Hover a blank part of the bar to see how to customize. Turn those popups off from the bar menu.",
+                  "<b>Double-click the name</b> at the top of this menu to rename the icon.",
+                  "Click an icon, then <b>drag and drop</b> it to reposition it along the bar, including into Left, Center, or Right.",
+                  "<b>Place</b> sets which numbered section this icon sits in.",
+                  "Check a <b>workspace</b> to copy this icon there. Uncheck to remove that copy.",
+                  "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on, it comes off every workspace.",
+                  "<b>Right-click the empty bar</b> to add an app, plugin, or web link.",
+                  "From the empty bar, change <b>icon size, transparency, and the bar color</b>.",
+                  "<b>Scroll</b> on the bar to resize icons. Hold <b>Alt and scroll</b> to change transparency.",
+                  "A <b>mark</b> under an app means it is open.",
+                  "The bar <b>slides away</b> until the pointer reaches the bottom edge.",
+                  "Hold <b>Super and drag this card</b> to move it. It stays where you drop it until you log out.",
+                  "Hold <b>Super and drag</b> a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom."
                 ]
                 delegate: Item {
+                  id: featureRow
                   required property var modelData
+                  required property int index
+                  property Item featureMark: featureText
                   width: parent.width
                   height: featureText.implicitHeight
 
@@ -3579,19 +5680,72 @@ Item {
                     color: root.menuForeground
                   }
 
-                  Text {
+                  HelpMarkText {
                     id: featureText
                     anchors.left: featureDot.right
                     anchors.leftMargin: Style.space(8)
                     anchors.right: parent.right
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    text: modelData
-                    color: root.menuForeground
-                    font.family: Style.font.menuFamily
-                    font.pixelSize: Style.font.body
+                    source: String(featureRow.modelData || "")
+                    segments: helpCard.segmentsFor(String(featureRow.modelData || ""), helpCard.helpQuery, false)
+                    hitCursorStart: helpCard.cursorStartFor(3, featureRow.index)
                   }
                 }
+              }
+            }
+          }
+        }
+
+        Row {
+          id: helpCarets
+          z: 2
+          anchors.horizontalCenter: parent.horizontalCenter
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: helpCard.contentBottomInset
+          spacing: Style.space(8)
+          height: Style.space(26)
+
+          readonly property real scrollMax: Math.max(0, helpFlick.contentHeight - helpFlick.height)
+          readonly property bool canUp: helpFlick.contentY > 1
+          readonly property bool canDown: helpFlick.contentY < scrollMax - 1
+
+          function nudge(delta) {
+            var step = Math.max(28, Math.round(helpFlick.height * 0.28))
+            helpFlick.scrollBy(delta * step)
+          }
+
+          Repeater {
+            model: [
+              { glyph: "⌃", down: false },
+              { glyph: "⌄", down: true }
+            ]
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool enabledCaret: modelData.down ? helpCarets.canDown : helpCarets.canUp
+              width: Style.space(26)
+              height: width
+              radius: width / 2
+              opacity: enabledCaret ? 1 : 0.32
+              color: caretMouse.containsMouse && enabledCaret ? root.menuFillHover : "transparent"
+              border.width: 1.5
+              border.color: caretMouse.containsMouse && enabledCaret ? root.menuStrokeHover : root.menuStroke
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: modelData.glyph
+                color: root.menuForeground
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              MouseArea {
+                id: caretMouse
+                anchors.fill: parent
+                hoverEnabled: enabledCaret
+                enabled: enabledCaret
+                cursorShape: enabledCaret ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: helpCarets.nudge(modelData.down ? 1 : -1)
               }
             }
           }

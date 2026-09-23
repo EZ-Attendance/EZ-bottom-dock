@@ -1,8 +1,24 @@
 // Pure helpers for the bottom dock layout and app search.
 .pragma library
 
+function maxSections() { return 8 }
+
+function emptySection(span) {
+  var n = Math.round(Number(span) || 0)
+  return { items: [], span: n > 0 ? n : 0 }
+}
+
 function emptyLayout() {
-  return { left: [], center: [], right: [] }
+  return { sections: [emptySection(0), emptySection(0), emptySection(0)] }
+}
+
+function sectionIndex(section) {
+  if (section === "left") return 0
+  if (section === "center") return 1
+  if (section === "right") return 2
+  var n = Math.round(Number(section))
+  if (isNaN(n) || n < 0) return 0
+  return n
 }
 
 function cloneItem(item) {
@@ -25,22 +41,47 @@ function cloneItem(item) {
   }
 }
 
+function cloneItemList(arr) {
+  var list = Array.isArray(arr) ? arr : []
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var e = cloneItem(list[i])
+    if (e) out.push(e)
+  }
+  return out
+}
+
 function cloneLayout(layout) {
   var src = layout && typeof layout === "object" ? layout : {}
-  function cloneSection(name) {
-    var arr = Array.isArray(src[name]) ? src[name] : []
-    var out = []
-    for (var i = 0; i < arr.length; i++) {
-      var e = cloneItem(arr[i])
-      if (e) out.push(e)
+  var sections = []
+  if (Array.isArray(src.sections)) {
+    for (var i = 0; i < src.sections.length && sections.length < maxSections(); i++) {
+      var sec = src.sections[i] || {}
+      var items = Array.isArray(sec.items) ? sec.items : []
+      var span = Math.round(Number(sec.span) || 0)
+      sections.push({ items: cloneItemList(items), span: span > 0 ? span : 0 })
     }
-    return out
+  } else {
+    sections.push({ items: cloneItemList(src.left), span: 0 })
+    sections.push({ items: cloneItemList(src.center), span: 0 })
+    sections.push({ items: cloneItemList(src.right), span: 0 })
   }
-  return {
-    left: cloneSection("left"),
-    center: cloneSection("center"),
-    right: cloneSection("right")
-  }
+  return { sections: sections }
+}
+
+function sectionsOf(layout) {
+  if (layout && Array.isArray(layout.sections)) return layout.sections
+  return cloneLayout(layout).sections
+}
+
+function groupCount(layout) {
+  return sectionsOf(layout).length
+}
+
+function sectionItems(layout, index) {
+  var sections = sectionsOf(layout)
+  var sec = sections[index]
+  return sec && Array.isArray(sec.items) ? sec.items : []
 }
 
 function cloneWorkspaceMap(map) {
@@ -82,6 +123,103 @@ function removeWorkspaceLayout(map, id) {
   return next
 }
 
+function normalizeEdge(edge) {
+  return edge === "left" || edge === "right" ? edge : "bottom"
+}
+
+function flagOn(value, fallback) {
+  if (value === undefined || value === null) return !!fallback
+  return value !== false && value !== 0 && value !== "false"
+}
+
+function defaultLook() {
+  return {
+    barEdge: "bottom",
+    iconSize: defaultIconSize(),
+    bgOpacity: defaultBgOpacity(),
+    bgColorKey: "",
+    bgColorHex: "",
+    showTips: true,
+    autoHide: true
+  }
+}
+
+function cloneLook(look, fallback) {
+  var base = fallback && typeof fallback === "object" ? fallback : defaultLook()
+  var src = look && typeof look === "object" ? look : {}
+  var size = Number(src.iconSize)
+  var opacity = Number(src.bgOpacity)
+  var edge = src.barEdge === "left" || src.barEdge === "right" || src.barEdge === "bottom"
+    ? src.barEdge
+    : base.barEdge
+  return {
+    barEdge: normalizeEdge(edge),
+    iconSize: size > 0 ? clampIconSize(size) : clampIconSize(base.iconSize || defaultIconSize()),
+    bgOpacity: src.bgOpacity !== undefined && src.bgOpacity !== null && !isNaN(opacity) && opacity >= 0
+      ? clampBgOpacity(opacity)
+      : clampBgOpacity(base.bgOpacity),
+    bgColorKey: src.bgColorKey !== undefined && src.bgColorKey !== null
+      ? String(src.bgColorKey || "")
+      : String(base.bgColorKey || ""),
+    bgColorHex: src.bgColorHex !== undefined && src.bgColorHex !== null
+      ? String(src.bgColorHex || "")
+      : String(base.bgColorHex || ""),
+    showTips: flagOn(src.showTips !== undefined ? src.showTips : base.showTips, true),
+    autoHide: flagOn(src.autoHide !== undefined ? src.autoHide : base.autoHide, true)
+  }
+}
+
+function cloneLookMap(map) {
+  var src = map && typeof map === "object" ? map : {}
+  var out = {}
+  for (var key in src) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    out[workspaceKey(key)] = cloneLook(src[key])
+  }
+  return out
+}
+
+function lookForWorkspace(map, id, fallbackLook) {
+  var key = workspaceKey(id)
+  var src = map && typeof map === "object" ? map : {}
+  var fallback = cloneLook(fallbackLook)
+  if (Object.prototype.hasOwnProperty.call(src, key))
+    return cloneLook(src[key], fallback)
+  return fallback
+}
+
+function setWorkspaceLook(map, id, look) {
+  var next = cloneLookMap(map)
+  next[workspaceKey(id)] = cloneLook(look)
+  return next
+}
+
+function patchLook(look, patch) {
+  var next = cloneLook(look)
+  if (!patch || typeof patch !== "object") return next
+  if (patch.barEdge !== undefined) next.barEdge = normalizeEdge(patch.barEdge)
+  if (patch.iconSize !== undefined) next.iconSize = clampIconSize(patch.iconSize)
+  if (patch.bgOpacity !== undefined) next.bgOpacity = clampBgOpacity(patch.bgOpacity)
+  if (patch.bgColorKey !== undefined) next.bgColorKey = String(patch.bgColorKey || "")
+  if (patch.bgColorHex !== undefined) next.bgColorHex = String(patch.bgColorHex || "")
+  if (patch.showTips !== undefined) next.showTips = !!patch.showTips
+  if (patch.autoHide !== undefined) next.autoHide = !!patch.autoHide
+  return next
+}
+
+// ids are workspace keys. Workspaces missing from the map start from fallbackLook.
+function applyLookPatch(map, ids, patch, fallbackLook) {
+  var next = cloneLookMap(map)
+  var list = Array.isArray(ids) ? ids : []
+  var fallback = cloneLook(fallbackLook)
+  for (var i = 0; i < list.length; i++) {
+    var key = workspaceKey(list[i])
+    var current = Object.prototype.hasOwnProperty.call(next, key) ? next[key] : fallback
+    next[key] = patchLook(current, patch)
+  }
+  return next
+}
+
 function firstNonEmptyLayout(map, preferred) {
   if (preferred && !isEmpty(preferred))
     return cloneLayout(preferred)
@@ -111,12 +249,134 @@ function pruneEmptyWorkspaceLayouts(map, fallbackLayout) {
   return cloneWorkspaceMap(map)
 }
 
-function sectionCount(layout, name) {
-  return (layout && Array.isArray(layout[name])) ? layout[name].length : 0
+function sectionLength(layout, index) {
+  return sectionItems(layout, index).length
 }
 
 function totalCount(layout) {
-  return sectionCount(layout, "left") + sectionCount(layout, "center") + sectionCount(layout, "right")
+  var sections = sectionsOf(layout)
+  var n = 0
+  for (var i = 0; i < sections.length; i++)
+    n += (sections[i].items || []).length
+  return n
+}
+
+function contentSpan(items, iconSlot, keybindSlot, gap) {
+  var list = Array.isArray(items) ? items : []
+  var slot = Math.max(1, Math.round(Number(iconSlot) || 28))
+  var keybind = Math.max(slot, Math.round(Number(keybindSlot) || (slot + 16)))
+  var g = Math.max(0, Math.round(Number(gap) || 0))
+  if (!list.length) return slot
+  var total = 0
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i]
+    total += item && String(item.kind || "") === "keybind" ? keybind : slot
+  }
+  if (list.length > 1) total += g * (list.length - 1)
+  return total
+}
+
+function floorSpan(iconSlot, gap) {
+  var slot = Math.max(1, Math.round(Number(iconSlot) || 28))
+  var g = Math.max(0, Math.round(Number(gap) || 0))
+  return slot * 3 + g * 2
+}
+
+function sectionMinimum(items, iconSlot, keybindSlot, gap) {
+  var list = Array.isArray(items) ? items : []
+  if (!list.length) return Math.max(1, Math.round(Number(iconSlot) || 28))
+  return contentSpan(list, iconSlot, keybindSlot, gap)
+}
+
+function assignMissingSpans(layout, iconSlot, keybindSlot, gap) {
+  var next = cloneLayout(layout)
+  var floor = floorSpan(iconSlot, gap)
+  var shared = floor
+  var i
+  for (i = 0; i < next.sections.length; i++) {
+    var content = contentSpan(next.sections[i].items, iconSlot, keybindSlot, gap)
+    if (next.sections[i].items.length && content > shared) shared = content
+  }
+  for (i = 0; i < next.sections.length; i++) {
+    var minSpan = sectionMinimum(next.sections[i].items, iconSlot, keybindSlot, gap)
+    if (!(next.sections[i].span > 0)) next.sections[i].span = Math.max(shared, minSpan)
+    else if (next.sections[i].span < minSpan) next.sections[i].span = minSpan
+  }
+  return next
+}
+
+function scaleSpans(layout, ratio) {
+  var next = cloneLayout(layout)
+  var r = Number(ratio)
+  if (!isFinite(r) || r <= 0) return next
+  for (var i = 0; i < next.sections.length; i++) {
+    var span = Math.round(next.sections[i].span * r)
+    if (span > 0) next.sections[i].span = span
+  }
+  return next
+}
+
+function resizeSection(layout, index, delta, minSpan) {
+  var next = cloneLayout(layout)
+  var i = Math.round(Number(index))
+  if (i < 0 || i >= next.sections.length) return next
+  var floor = Math.max(1, Math.round(Number(minSpan) || 1))
+  var span = next.sections[i].span + Math.round(Number(delta) || 0)
+  if (span < floor) span = floor
+  next.sections[i].span = span
+  return next
+}
+
+function resizeTail(layout, delta, minSpan) {
+  var count = groupCount(layout)
+  if (!count) return cloneLayout(layout)
+  return resizeSection(layout, count - 1, delta, minSpan)
+}
+
+function resizeBoundary(layout, index, delta, minA, minB) {
+  var next = cloneLayout(layout)
+  var i = Math.round(Number(index))
+  if (i < 0 || i + 1 >= next.sections.length) return next
+  var a = next.sections[i].span
+  var b = next.sections[i + 1].span
+  var grow = Math.round(Number(delta) || 0)
+  var floorA = Math.max(1, Math.round(Number(minA) || 1))
+  var floorB = Math.max(1, Math.round(Number(minB) || 1))
+  if (grow > 0) {
+    var shrink = Math.min(grow, Math.max(0, b - floorB))
+    next.sections[i].span = a + grow
+    next.sections[i + 1].span = b - shrink
+  } else if (grow < 0) {
+    var need = -grow
+    var shrinkA = Math.min(need, Math.max(0, a - floorA))
+    next.sections[i].span = a - shrinkA
+    next.sections[i + 1].span = b + need
+  }
+  return next
+}
+
+function addSection(layout, span) {
+  var next = cloneLayout(layout)
+  if (next.sections.length >= maxSections()) return next
+  next.sections.push(emptySection(span))
+  return next
+}
+
+function removeSection(layout, index) {
+  var next = cloneLayout(layout)
+  var i = Math.round(Number(index))
+  if (i < 0 || i >= next.sections.length) return next
+  next.sections.splice(i, 1)
+  return next
+}
+
+function ensureSections(layout, index, emptySpan) {
+  var next = cloneLayout(layout)
+  var idx = sectionIndex(index)
+  if (idx >= maxSections()) idx = maxSections() - 1
+  while (next.sections.length <= idx && next.sections.length < maxSections())
+    next.sections.push(emptySection(emptySpan))
+  return next
 }
 
 function isEmpty(layout) {
@@ -137,7 +397,10 @@ function parseDockConfig(rawText, pluginId) {
     bgColorKey: "",
     bgColorHex: "",
     showTips: true,
+    autoHide: true,
     barEdge: "bottom",
+    globalChanges: false,
+    workspaceLooks: {},
     hasWorkspaceMap: false,
     hasDefaultLayout: false
   }
@@ -157,8 +420,14 @@ function parseDockConfig(rawText, pluginId) {
           cfg.bgColorHex = String(entry.bgColorHex || "")
         if (entry.showTips !== undefined && entry.showTips !== null)
           cfg.showTips = entry.showTips !== false && entry.showTips !== 0 && entry.showTips !== "false"
+        if (entry.autoHide !== undefined && entry.autoHide !== null)
+          cfg.autoHide = entry.autoHide !== false && entry.autoHide !== 0 && entry.autoHide !== "false"
         if (entry.barEdge === "left" || entry.barEdge === "right" || entry.barEdge === "bottom")
           cfg.barEdge = entry.barEdge
+        if (entry.globalChanges !== undefined && entry.globalChanges !== null)
+          cfg.globalChanges = entry.globalChanges === true || entry.globalChanges === 1 || entry.globalChanges === "true"
+        if (entry.workspaceLooks && typeof entry.workspaceLooks === "object")
+          cfg.workspaceLooks = cloneLookMap(entry.workspaceLooks)
         if (entry.defaultLayout && typeof entry.defaultLayout === "object") {
           cfg.defaultLayout = cloneLayout(entry.defaultLayout)
           cfg.hasDefaultLayout = !isEmpty(cfg.defaultLayout)
@@ -175,11 +444,27 @@ function parseDockConfig(rawText, pluginId) {
   return cfg
 }
 
+function iconSizeMin() { return 20 }
+function iconSizeMax() { return 96 }
+
 function clampIconSize(n) {
   var v = Math.round(Number(n) || 0)
-  if (v < 20) return 20
-  if (v > 96) return 96
+  if (v < iconSizeMin()) return iconSizeMin()
+  if (v > iconSizeMax()) return iconSizeMax()
   return v
+}
+
+// Smallest icon reads as 10%, largest as 100%.
+function iconSizePercent(n) {
+  var v = clampIconSize(n)
+  var span = iconSizeMax() - iconSizeMin()
+  if (span <= 0) return 100
+  return Math.round(10 + (v - iconSizeMin()) * 90 / span)
+}
+
+// 0% is solid, 100% is fully see-through. bgOpacity is the inverse.
+function transparencyPercent(opacity) {
+  return 100 - clampBgOpacity(opacity)
 }
 
 function clampBgOpacity(n) {
@@ -319,10 +604,9 @@ function keybindWords(description) {
 
 function collectBadges(layout) {
   var used = {}
-  var names = ["left", "center", "right"]
-  var src = layout && typeof layout === "object" ? layout : {}
-  for (var s = 0; s < names.length; s++) {
-    var arr = Array.isArray(src[names[s]]) ? src[names[s]] : []
+  var sections = sectionsOf(layout)
+  for (var s = 0; s < sections.length; s++) {
+    var arr = sections[s] && Array.isArray(sections[s].items) ? sections[s].items : []
     for (var i = 0; i < arr.length; i++) {
       var item = arr[i]
       if (!item || String(item.kind || "") !== "keybind") continue
@@ -551,14 +835,11 @@ function setItemBadge(layout, itemId, badge) {
   var next = cloneLayout(layout)
   var want = String(itemId || "")
   var mark = String(badge || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 3)
-  if (!want.length || !mark.length)
-    return next
-  var sections = ["left", "center", "right"]
-  for (var i = 0; i < sections.length; i++) {
-    var key = sections[i]
-    for (var j = 0; j < next[key].length; j++) {
-      if (next[key][j] && next[key][j].id === want)
-        next[key][j].badge = mark
+  if (!want.length || !mark.length) return next
+  for (var i = 0; i < next.sections.length; i++) {
+    var arr = next.sections[i].items
+    for (var j = 0; j < arr.length; j++) {
+      if (arr[j] && arr[j].id === want) arr[j].badge = mark
     }
   }
   return next
@@ -568,14 +849,11 @@ function renameItem(layout, itemId, label) {
   var next = cloneLayout(layout)
   var want = String(itemId || "")
   var name = String(label || "").trim()
-  if (!want.length || !name.length)
-    return next
-  var sections = ["left", "center", "right"]
-  for (var i = 0; i < sections.length; i++) {
-    var key = sections[i]
-    for (var j = 0; j < next[key].length; j++) {
-      if (next[key][j] && next[key][j].id === want)
-        next[key][j].label = name
+  if (!want.length || !name.length) return next
+  for (var i = 0; i < next.sections.length; i++) {
+    var arr = next.sections[i].items
+    for (var j = 0; j < arr.length; j++) {
+      if (arr[j] && arr[j].id === want) arr[j].label = name
     }
   }
   return next
@@ -583,23 +861,40 @@ function renameItem(layout, itemId, label) {
 
 function stripId(layout, itemId) {
   var next = cloneLayout(layout)
-  var sections = ["left", "center", "right"]
-  for (var i = 0; i < sections.length; i++) {
-    var key = sections[i]
+  for (var i = 0; i < next.sections.length; i++) {
     var kept = []
-    for (var j = 0; j < next[key].length; j++) {
-      if (next[key][j].id !== itemId) kept.push(next[key][j])
+    var arr = next.sections[i].items
+    for (var j = 0; j < arr.length; j++) {
+      if (arr[j].id !== itemId) kept.push(arr[j])
     }
-    next[key] = kept
+    next.sections[i].items = kept
   }
   return next
 }
 
 function addItem(layout, section, item) {
-  var key = section === "left" || section === "right" ? section : "center"
-  var next = stripId(layout, item.id)
-  next[key].push(item)
+  var idx = sectionIndex(section)
+  var next = stripId(layout, item && item.id)
+  if (!next.sections.length) next.sections.push(emptySection(0))
+  if (idx >= next.sections.length) idx = next.sections.length - 1
+  var copy = cloneItem(item)
+  if (copy) next.sections[idx].items.push(copy)
   return next
+}
+
+function addItemClamped(layout, section, item, emptySpan) {
+  var next = cloneLayout(layout)
+  if (!next.sections.length) next.sections.push(emptySection(emptySpan))
+  var idx = sectionIndex(section)
+  if (idx >= next.sections.length) idx = next.sections.length - 1
+  return addItem(next, idx, item)
+}
+
+function addItemGrowing(layout, section, item, emptySpan) {
+  var idx = sectionIndex(section)
+  if (idx >= maxSections()) idx = maxSections() - 1
+  var next = ensureSections(layout, idx, emptySpan)
+  return addItem(next, idx, item)
 }
 
 function removeItem(layout, itemId) {
@@ -612,13 +907,12 @@ function findItem(layout, itemId) {
 }
 
 function findItemLocation(layout, itemId) {
-  var sections = ["left", "center", "right"]
+  var sections = sectionsOf(layout)
   for (var i = 0; i < sections.length; i++) {
-    var key = sections[i]
-    var arr = layout && Array.isArray(layout[key]) ? layout[key] : []
+    var arr = sections[i] && Array.isArray(sections[i].items) ? sections[i].items : []
     for (var j = 0; j < arr.length; j++) {
       if (arr[j] && arr[j].id === itemId)
-        return { section: key, index: j, item: arr[j] }
+        return { section: i, index: j, item: arr[j] }
     }
   }
   return null
@@ -634,25 +928,35 @@ function moveItem(layout, itemId, section) {
 function moveItemAt(layout, itemId, section, index) {
   var loc = findItemLocation(layout, itemId)
   if (!loc) return layout
-  var key = section === "left" || section === "right" ? section : "center"
+  var key = sectionIndex(section)
   var next = cloneLayout(layout)
+  if (key < 0 || key >= next.sections.length) return layout
+  var from = next.sections[loc.section].items
   var item = null
-  for (var i = 0; i < next[loc.section].length; i++) {
-    if (next[loc.section][i].id === itemId) {
-      item = next[loc.section][i]
-      next[loc.section].splice(i, 1)
+  for (var i = 0; i < from.length; i++) {
+    if (from[i].id === itemId) {
+      item = from[i]
+      from.splice(i, 1)
       break
     }
   }
   if (!item) return layout
+  var dest = next.sections[key].items
   var idx = Math.round(Number(index))
-  if (isNaN(idx)) idx = next[key].length
-  if (loc.section === key && loc.index < idx)
-    idx -= 1
+  if (isNaN(idx)) idx = dest.length
+  if (loc.section === key && loc.index < idx) idx -= 1
   if (idx < 0) idx = 0
-  if (idx > next[key].length) idx = next[key].length
-  next[key].splice(idx, 0, item)
+  if (idx > dest.length) idx = dest.length
+  dest.splice(idx, 0, item)
   return next
+}
+
+function moveItemAtGrowing(layout, itemId, section, index, emptySpan, item) {
+  var idx = sectionIndex(section)
+  if (idx >= maxSections()) idx = maxSections() - 1
+  var next = ensureSections(layout, idx, emptySpan)
+  if (!findItem(next, itemId) && item) next = addItem(next, idx, item)
+  return moveItemAt(next, itemId, idx, index)
 }
 
 function normalizeAppId(value) {
@@ -663,6 +967,22 @@ function normalizeAppId(value) {
     .replace(/\s+/g, "-")
 }
 
+// Hostnames used by Chrome web apps end in a public suffix. That suffix is
+// not an application name: "plugins.omarchy.org" must not match the agent
+// window "org.omarchy.agent" through the token "org".
+function isPublicSuffix(label) {
+  var tlds = {
+    "org": true, "com": true, "net": true, "io": true, "dev": true,
+    "app": true, "ai": true, "sh": true, "so": true, "me": true,
+    "tv": true, "gg": true, "co": true, "uk": true, "de": true,
+    "fr": true, "page": true, "site": true, "xyz": true, "id": true,
+    "to": true, "cc": true, "ly": true, "be": true, "nl": true,
+    "cloud": true, "design": true, "software": true, "edu": true,
+    "gov": true, "info": true, "biz": true
+  }
+  return tlds[String(label || "")] === true
+}
+
 function appIdTokens(value) {
   var id = normalizeAppId(value)
   if (!id) return []
@@ -670,7 +990,7 @@ function appIdTokens(value) {
   var parts = id.split(".")
   if (parts.length > 1) {
     var last = parts[parts.length - 1]
-    if (last && out.indexOf(last) < 0) out.push(last)
+    if (last && !isPublicSuffix(last) && out.indexOf(last) < 0) out.push(last)
   }
   return out
 }
@@ -682,8 +1002,10 @@ function idsMatch(a, b) {
   for (var i = 0; i < left.length; i++) {
     for (var j = 0; j < right.length; j++) {
       if (left[i] === right[j]) return true
-      if (left[i].indexOf(right[j]) >= 0 || right[j].indexOf(left[i]) >= 0)
-        return true
+      var shorter = left[i].length <= right[j].length ? left[i] : right[j]
+      var longer = shorter === left[i] ? right[j] : left[i]
+      if (isPublicSuffix(shorter)) continue
+      if (longer.indexOf(shorter) >= 0) return true
     }
   }
   return false

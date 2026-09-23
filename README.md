@@ -39,34 +39,33 @@ omarchy plugin remove drace3000.bottom-dock
 
 ### Auto-hide
 
-The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Hold Super and drag the bar toward the left or right edge to park it there. Drag it inward or downward to put it back on the bottom. A tip shows Left edge, Right edge, or Bottom while you drag.
+The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Hold Super and drag a blank part of the bar to move it to the left, the right, or the bottom.
 
-### Left / Center / Right slots
+### Numbered sections
 
-Icons are grouped into three sections: **Left**, **Center**, and **Right**.
+Each workspace can have up to eight numbered sections, or none. **+** adds an empty section at the end. Click a section number to press it in, then **−** removes it. An empty section is removed at once. A section that still has icons asks before it is deleted.
 
-### Add apps, plugins, and web links
+Drag a separator to widen or narrow the section in front of it, including the separator beside the globe. The section moves only while **Super** is held or the mouse button is down. A section will not shrink smaller than its icons. This resize stays on the workspace you are changing, even when Global Changes is on.
 
-Right-click the dock background:
+### Add apps, plugins, web links, and keybinds
 
-1. In **ADD**, choose **App**, **Plugin**, or **Web**.
-2. Pick placement with the **Left / Center / Right** radios.
+Right-click the dock background, or click the **gear**:
+
+1. Choose **App**, **Plugin**, **Web**, or **KeyBind**.
+2. The numbers under those buttons choose which section receives the new icon.
 3. Complete the picker:
    - **App** — search and pick a desktop app
    - **Plugin** — pick a summonable Omarchy shell plugin (panels, menus, overlays, and many bar widgets)
    - **Web** — enter a name and URL
-   - **Keybind** — pick an Omarchy shortcut. It appears as a short letter badge. Left-click runs that shortcut.
+   - **KeyBind** — pick an Omarchy shortcut. The icon shows up to three letters. Hover shows the name. Left-click runs the shortcut.
 
 ### Per-icon actions
 
-**Right-click an icon** to:
-
-- Move it to Left, Center, or Right
-- Remove it from the dock
+**Right-click an icon** to edit its label, choose its section, choose its workspaces, or remove it. The circled **i** opens help for that icon. The circled **X** closes the menu.
 
 ### Drag and drop
 
-**Click and drag** an icon to reorder it or move it between Left / Center / Right.
+**Click and drag** an icon to move it along the bar, including into another numbered section. Hold **Super** and drag a blank part of the bar to the left, the right, or the bottom to move the bar there.
 
 ### Running and focused indicators
 
@@ -74,7 +73,15 @@ App icons and keybind badges show a blinking underline while that window is open
 
 ### Icon popups (tooltips)
 
-Hover an icon to see its name above the dock (to the right of the cursor). Toggle this under **SETTINGS → Icon popups**.
+Hover an icon to see its name. If that icon has a blinking underline, the popup also shows **(n)** for how many of that item are open on this workspace. Turn popups off from the bar menu.
+
+### Global Changes
+
+The **globe** after the last section is the Global Changes switch. Neon green is on. Neon red is off. When it is on, the next edit applies to every workspace: icons added, moved, or removed, and the bar's edge, size, color, popups, and auto-hide. Adding or moving an icon into a section number another workspace does not have yet adds empty sections there until that number exists. The globe and the **gear** beside it are shared. They cannot be moved or removed. The gear opens the same settings menu as a right-click on a blank part of the bar.
+
+### Help
+
+The circled **i**, with no icon selected, opens task bar help. The search field highlights every match with a yellow background and jumps to the first one. The down arrow jumps to the next match. The circled **X** inside the search field clears the search.
 
 ### Per-workspace layouts
 
@@ -130,14 +137,18 @@ Right-click the dock background:
 
 **ADD**
 
-- App / Plugin / Web pills
-- Left / Center / Right radio group
+- App / Plugin / Web / KeyBind
+- Section numbers under those buttons
 
 **SETTINGS**
 
+- Section numbers, **+**, and **−**
 - Icon Size `+` / `-`
 - Transparency `+` / `-`
-- Icon popups (checkbox)
+- Background color swatches, including Theme
+- Icon popups
+- Global Changes
+- Auto hide task bar
 
 ## Notes
 
