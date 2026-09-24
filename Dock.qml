@@ -78,8 +78,19 @@ Item {
   property bool resizeTail: false
   property bool superDown: false
   property int resizePreviewTick: 0
+  // Bumped whenever a saved layout is applied. Section widths and the bar's
+  // place on screen read this so a login reload is not stuck on the first paint.
+  property int layoutEpoch: 0
   property int resizeFrozenLead: -1
   property bool resizeButtonDown: false
+  // Stays set briefly after the button is released so the compositor's
+  // bar-move commit, which arrives with that release, cannot relocate the bar.
+  property bool separatorHoldsBar: false
+  // Set when the pointer leaves the separator, so the resize cursor is gone.
+  // Further motion does not resize until the next press.
+  property bool separatorGripLost: false
+  property real separatorPressX: 0
+  property real separatorPressY: 0
   property real resizeOriginAlong: 0
   property var resizeBaseLayout: null
   property int dropIndex: 0
@@ -114,6 +125,22 @@ Item {
     return runtime + "/drace3000-bottom-dock-help-pos.json"
   }
   readonly property string edgeDragLuaPath: home + "/.config/omarchy/plugins/drace3000.bottom-dock/edge-drag.lua"
+  // Screen rectangles of separator hit areas. Hyprland decides a bar drag
+  // from the cursor before the separator MouseArea sees the press.
+  readonly property string separatorZonePath: {
+    var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    if (!runtime.length) runtime = "/tmp"
+    return runtime + "/drace3000-bottom-dock-separators"
+  }
+  readonly property string separatorHoldPath: {
+    var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    if (!runtime.length) runtime = "/tmp"
+    return runtime + "/drace3000-bottom-dock-separator-hold"
+  }
+  property var separatorZones: ({})
+  property bool separatorZonesQueued: false
+  property bool separatorZonesLive: true
+  property int separatorSerial: 0
   readonly property string windowMoveBindScript:
     "hl.unbind(\"SUPER + mouse:272\")\n" +
     "o.bind(\"SUPER + mouse:272\", \"Move window\", hl.dsp.window.drag(), { mouse = true })\n"
@@ -148,6 +175,7 @@ Item {
 
   property bool tipVisible: false
   property string tipText: ""
+  property bool tipStop: false
   property var tipItem: null
   property var tipItemScreen: null
   property real tipX: 0
@@ -156,8 +184,13 @@ Item {
   property int tipRequest: 0
 
   readonly property bool hovered: hoverCount > 0
-  readonly property bool uiHeld: menuOpen || pickerOpen || webOpen || dragging || barEdgeDragging
+  readonly property bool uiHeld: menuOpen || pickerOpen || webOpen || dragging || barEdgeDragging || welcomeOpen
   readonly property bool layoutEmpty: DockModel.isEmpty(layout)
+  property bool configReady: false
+  property bool welcomeOpen: false
+  // Stays closed after the X or the five-second timer until icons come back,
+  // the workspace changes, or the shell starts again on an empty bar.
+  property bool welcomeHold: false
 
   readonly property int dockHeight: DockModel.dockHeightForIcons(iconSize)
   // Extra room on each side of the icons when the bar is on the left or right.
@@ -297,7 +330,17 @@ Item {
     var along = barContentAlong(layout, vertical, metrics)
     var sw = screen ? Number(screen.width) || 0 : 0
     var sh = screen ? Number(screen.height) || 0 : 0
-    var screenAlong = Math.max(1, vertical ? sh : sw)
+    var screenAlong = vertical ? sh : sw
+    // Screen size is often still 0 on the first paint after login. Pretending
+    // it is 1px wide anchors the bar to the left edge until something else,
+    // such as dragging a separator, forces this function to run again.
+    if (!(screenAlong > 0)) {
+      return {
+        lead: vertical ? endGap : 0,
+        trail: 0,
+        fitted: Math.max(metrics.barCross, along)
+      }
+    }
     var available = vertical ? Math.max(metrics.barCross, screenAlong - endGap) : screenAlong
     var fitted = Math.max(metrics.barCross, Math.min(along, available))
     var slack = Math.max(0, (vertical ? available : screenAlong) - fitted)
@@ -482,6 +525,9 @@ Item {
   }
 
   Component.onDestruction: {
+    separatorZonesLive = false
+    try { separatorZoneFile.setText("\n") } catch (e) {}
+    try { root.releaseSeparatorHold() } catch (e) {}
     if (windowMoveHolds > 0)
       Util.execArgv(["bash", "-lc", "hyprctl eval \"$(cat '" + edgeDragLuaPath + "')\""])
   }
@@ -511,8 +557,65 @@ Item {
     return null
   }
 
+  function armSeparatorBarHold() {
+    separatorHoldsBar = true
+    separatorHoldTimer.stop()
+    separatorHoldFile.setText("1\n")
+  }
+
+  // The button is still down after the pointer leaves the strip. Keep blocking
+  // a bar move until that button comes up. The timer is only a fallback.
+  function armSeparatorHoldFallback() {
+    if (!separatorHoldsBar || separatorHoldTimer.running) return
+    separatorHoldTimer.restart()
+  }
+
+  function releaseSeparatorHold() {
+    separatorHoldTimer.stop()
+    separatorHoldsBar = false
+    resizeButtonDown = false
+    separatorGripLost = false
+    separatorHoldFile.setText("0\n")
+  }
+
+  function separatorOutsideChrome(chromeItem, x, y) {
+    if (!chromeItem) return false
+    return x < 0 || y < 0 || x > chromeItem.width || y > chromeItem.height
+  }
+
+  // Pointer left the task bar during a separator drag. Stop resizing and
+  // keep the bar where it is.
+  function abandonSeparatorDrag() {
+    separatorGripLost = true
+    endSectionResize()
+    armSeparatorHoldFallback()
+  }
+
+  function separatorReleased() {
+    if (resizeBoundaryIndex >= 0)
+      endSectionResize()
+    releaseSeparatorHold()
+    return "ok"
+  }
+
+  // Bottom bar: left/right only. Side bar: up/down only, along the bar.
+  function separatorDragAlong(horizontal, x, y) {
+    var dx = x - separatorPressX
+    var dy = y - separatorPressY
+    if (horizontal) return Math.abs(dx) > Math.abs(dy)
+    return Math.abs(dy) > Math.abs(dx)
+  }
+
   // Global pointer positions from the Hyprland Super+drag bind.
   function applyBarDrag(x0, y0, x1, y1, commit) {
+    if (separatorHoldsBar || resizeButtonDown || resizeBoundaryIndex >= 0) {
+      if (commit) {
+        barEdgeDragging = false
+        hideIconTip()
+        releaseSeparatorHold()
+      }
+      return "separator"
+    }
     var mon = monitorAtGlobal(x0, y0) || monitorAtGlobal(x1, y1)
     if (!mon) {
       if (commit) {
@@ -542,6 +645,7 @@ Item {
   }
 
   function setBarEdge(edge, screen) {
+    if (edge === "blocked") return
     var id = screen ? workspaceIdForScreen(screen) : workspaceId
     var next = edge === "left" || edge === "right" ? edge : "bottom"
     if (!globalChanges && next === lookFor(id).barEdge) return
@@ -594,22 +698,132 @@ Item {
     }
   }
 
+  function pointerGlobal(panel, sceneX, sceneY) {
+    var g = globalFromPanel(panel, sceneX, sceneY)
+    var slide = panel ? Number(panel.localSlide) || 0 : 0
+    var edge = panel ? String(panel.screenEdge || "bottom") : "bottom"
+    if (edge === "bottom") g.y += slide
+    else if (edge === "left") g.x -= slide
+    else if (edge === "right") g.x += slide
+    return g
+  }
+
+  function itemOnScreen(item) {
+    var node = item
+    var guard = 0
+    while (node && guard < 30) {
+      if (node.visible === false) return false
+      node = node.parent
+      guard = guard + 1
+    }
+    return true
+  }
+
+  // Hit rectangle of a separator, in the same coordinates as the Hyprland cursor.
+  // A hidden bar is off the screen, so it contributes no rectangle.
+  function separatorScreenRect(panel, chromeItem, item) {
+    if (!panel || !chromeItem || !item || !itemOnScreen(item)) return null
+    var w = Math.round(item.width)
+    var h = Math.round(item.height)
+    if (w < 1 || h < 1) return null
+    var slide = Number(panel.localSlide) || 0
+    if (slide > 2) return null
+    var p = item.mapToItem(chromeItem, 0, 0)
+    if (!p) return null
+    var g = pointerGlobal(panel, p.x, p.y)
+    var edge = panel ? String(panel.screenEdge || "bottom") : "bottom"
+    var origin = pointerGlobal(panel, 0, 0)
+    var x = Math.round(g.x)
+    var y = Math.round(g.y)
+    var pad = 6
+    // Match the bottom bar: the hit covers the whole thickness of the strip,
+    // and only the along-bar gap is narrow. A side bar was only as wide as
+    // an icon, so a press on the line missed and became a bar move.
+    if (edge === "bottom") {
+      y = Math.round(origin.y)
+      h = Math.max(h, Math.round(chromeItem.height))
+      x -= pad
+      w += pad * 2
+    } else {
+      x = Math.round(origin.x)
+      w = Math.max(w, Math.round(chromeItem.width))
+      y -= pad
+      h += pad * 2
+    }
+    return { x: x, y: y, w: w, h: h }
+  }
+
+  function pointerOverSeparator(gx, gy) {
+    var zones = separatorZones
+    for (var k in zones) {
+      if (!Object.prototype.hasOwnProperty.call(zones, k)) continue
+      var r = zones[k]
+      if (!r) continue
+      if (gx >= r.x && gy >= r.y && gx < r.x + r.w && gy < r.y + r.h)
+        return true
+    }
+    return false
+  }
+
+  function noteSeparatorZone(id, rect) {
+    if (!id || !id.length) return
+    var zones = separatorZones
+    if (!rect) {
+      if (!zones[id]) return
+      delete zones[id]
+    } else {
+      var prev = zones[id]
+      if (prev && prev.x === rect.x && prev.y === rect.y && prev.w === rect.w && prev.h === rect.h)
+        return
+      zones[id] = rect
+    }
+    separatorZones = zones
+    if (separatorZonesQueued) return
+    separatorZonesQueued = true
+    Qt.callLater(flushSeparatorZones)
+  }
+
+  function flushSeparatorZones() {
+    separatorZonesQueued = false
+    if (!separatorZonesLive) {
+      separatorZoneFile.setText("\n")
+      return
+    }
+    var lines = []
+    var zones = separatorZones
+    for (var k in zones) {
+      if (!Object.prototype.hasOwnProperty.call(zones, k)) continue
+      var r = zones[k]
+      if (!r) continue
+      lines.push(r.x + " " + r.y + " " + r.w + " " + r.h)
+    }
+    separatorZoneFile.setText(lines.join("\n") + "\n")
+  }
+
   // The bar already sits on an edge, so "nearest edge" would keep it there.
   // Use the drag direction instead: sideways from the bottom picks a side,
   // and dragging inward or downward from a side returns to the bottom.
+  // The top edge belongs to the shell bar. Refuse only when the pointer
+  // is up against that edge, not because the drag is moving upward.
   function edgeFromDrag(current, x0, y0, x1, y1, screenW, screenH) {
     var dx = x1 - x0
     var dy = y1 - y0
     var minTravel = 56
+    if (y1 < 110)
+      return "blocked"
     if (Math.abs(dx) < minTravel && Math.abs(dy) < minTravel)
       return current === "left" || current === "right" ? current : "bottom"
     if (current === "left") {
-      if (dx >= minTravel && x1 > screenW * 0.55) return "right"
+      // Opposite edge only for a sideways sweep that ends on that side.
+      // Pulling the bar inward or downward puts it back on the bottom.
+      var acrossRight = dx >= minTravel && Math.abs(dx) > Math.abs(dy) * 1.25 && x1 > screenW * 0.65
+      if (acrossRight) return "right"
       if (dx >= minTravel || dy >= minTravel) return "bottom"
       return "left"
     }
     if (current === "right") {
-      if (dx <= -minTravel && x1 < screenW * 0.45) return "left"
+      var acrossLeft = dx <= -minTravel && Math.abs(dx) > Math.abs(dy) * 1.25 && x1 < screenW * 0.35
+      if (acrossLeft) return "left"
       if (dx <= -minTravel || dy >= minTravel) return "bottom"
       return "right"
     }
@@ -619,7 +833,10 @@ Item {
   }
 
   function showEdgeHint(screen, x, y, edge) {
-    tipText = edge === "left" ? "Left edge" : edge === "right" ? "Right edge" : "Bottom"
+    tipStop = edge === "blocked"
+    tipText = edge === "blocked" ? "" : edge === "left" ? "Left edge" : edge === "right" ? "Right edge" : "Bottom"
+    tipItem = null
+    tipItemScreen = null
     tipScreen = screen
     tipX = x + Style.space(14)
     tipY = y
@@ -669,7 +886,9 @@ Item {
     removeSectionPick = removeSectionPick === i ? -1 : i
   }
 
-  function dropSection(index) {
+  // Named apart from the dropSection property, which is the icon-drag target.
+  // A same-named function is hidden by that property and throws on call.
+  function deleteSectionAt(index) {
     var i = Math.round(Number(index))
     removeSectionPick = -1
     commitLayout(function(current) { return DockModel.removeSection(current, i) }, "sections")
@@ -682,7 +901,7 @@ Item {
     if (!sectionHasIcons(i)) {
       confirmRemoveOpen = false
       confirmSectionIndex = -1
-      dropSection(i)
+      deleteSectionAt(i)
       return
     }
     confirmSectionIndex = i
@@ -699,7 +918,7 @@ Item {
     confirmRemoveOpen = false
     confirmSectionIndex = -1
     if (index < 0) return
-    dropSection(index)
+    deleteSectionAt(index)
     closeMenus()
   }
 
@@ -876,11 +1095,38 @@ Item {
     }
   }
 
+  function refreshWelcome() {
+    if (!configReady) return
+    if (!DockModel.isEmpty(layout)) {
+      welcomeOpen = false
+      welcomeHold = false
+      welcomeTimer.stop()
+      return
+    }
+    if (DockModel.groupCount(layout) < 1) {
+      Qt.callLater(function() {
+        if (!configReady || !DockModel.isEmpty(layout) || DockModel.groupCount(layout) > 0) return
+        persistLayout(DockModel.emptyLayout())
+      })
+      return
+    }
+    if (welcomeOpen || welcomeHold) return
+    welcomeOpen = true
+    welcomeTimer.restart()
+  }
+
+  function dismissWelcome() {
+    welcomeOpen = false
+    welcomeHold = true
+    welcomeTimer.stop()
+  }
+
   function hideIconTip() {
     tipRequest += 1
     tipDelay.stop()
     tipVisible = false
     tipText = ""
+    tipStop = false
     tipItem = null
     tipItemScreen = null
     tipScreen = null
@@ -895,6 +1141,7 @@ Item {
     }
     tipItem = null
     tipItemScreen = null
+    tipStop = false
     tipText = label
     tipScreen = screen
     // Screen-local cursor. The tip card centers on this point.
@@ -1082,7 +1329,7 @@ Item {
     return DockModel.lookForWorkspace(workspaceLooks, id, defaultLook)
   }
 
-  // One tone is an 8% step in lightness. Three tones is the watermark on an empty section.
+  // One tone is an 8% step in lightness.
   function shiftTones(color, steps) {
     var c = color
     var light = c.hslLightness + 0.08 * steps
@@ -1227,6 +1474,7 @@ Item {
 
   function persistLayout(next) {
     layout = materializeLayout(DockModel.cloneLayout(next))
+    layoutEpoch = layoutEpoch + 1
     var key = DockModel.workspaceKey(workspaceId)
     var touched = Object.assign({}, workspaceTouched)
     touched[key] = true
@@ -1268,6 +1516,7 @@ Item {
     if (!Object.prototype.hasOwnProperty.call(maps, currentKey))
       maps[currentKey] = mutator(DockModel.cloneLayout(layout))
     layout = DockModel.cloneLayout(maps[currentKey])
+    layoutEpoch = layoutEpoch + 1
     defaultLayout = DockModel.cloneLayout(nextDefault)
     workspaceLayouts = maps
     var touched = Object.assign({}, workspaceTouched)
@@ -1384,6 +1633,7 @@ Item {
       layout = DockModel.cloneLayout(workspaceLayouts[nextId])
     else
       layout = DockModel.cloneLayout(defaultLayout)
+    layoutEpoch = layoutEpoch + 1
     applyActiveLook(lookFor(nextId))
   }
 
@@ -1636,8 +1886,12 @@ Item {
   }
 
   function loadDockConfig(rawText) {
+    var raw = String(rawText || "")
+    // A file watch can fire while shell.json is being replaced and hand us
+    // an empty read. Applying that would wipe the saved section widths.
+    if (raw.indexOf(pluginId) < 0) return
     _loadingConfig = true
-    var cfg = DockModel.parseDockConfig(rawText, pluginId)
+    var cfg = DockModel.parseDockConfig(raw, pluginId)
     workspaceId = DockModel.workspaceKey(currentHyprWorkspaceId())
 
     var maps = cfg.hasWorkspaceMap ? cfg.workspaces : ({})
@@ -1703,7 +1957,9 @@ Item {
     applyActiveLook(lookFor(workspaceId))
     materializeAllLayouts()
     _loadingConfig = false
+    configReady = true
     persistSettings()
+    refreshWelcome()
   }
 
   function materializeAllLayouts() {
@@ -1721,6 +1977,7 @@ Item {
       layout = DockModel.cloneLayout(workspaceLayouts[DockModel.workspaceKey(workspaceId)])
     else
       layout = DockModel.cloneLayout(defaultLayout)
+    layoutEpoch = layoutEpoch + 1
   }
 
   function emptySeed(cfg, maps) {
@@ -2276,8 +2533,25 @@ Item {
     }
   }
 
+  onLayoutChanged: refreshWelcome()
+  onWorkspaceIdChanged: welcomeHold = false
+
+  Timer {
+    id: welcomeTimer
+    interval: 5000
+    repeat: false
+    onTriggered: root.dismissWelcome()
+  }
+
+  Timer {
+    id: separatorHoldTimer
+    interval: 8000
+    repeat: false
+    onTriggered: root.releaseSeparatorHold()
+  }
+
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v3")
+    console.log("bottom-dock loaded search-v30")
     root.refreshPluginCatalog()
     root.refreshBackgroundPalette()
     root.requestClientSync()
@@ -2483,6 +2757,7 @@ Item {
     function moveBarByDrag(x0: string, y0: string, x1: string, y1: string): string {
       return root.applyBarDrag(Number(x0), Number(y0), Number(x1), Number(y1), true)
     }
+    function separatorReleased(): string { return root.separatorReleased() }
     function workspaceState(): string {
       var keys = []
       for (var k in root.workspaceLayouts) {
@@ -2546,6 +2821,22 @@ Item {
     onLoaded: root.applyHelpPosText(text())
   }
 
+  FileView {
+    id: separatorZoneFile
+    path: root.separatorZonePath
+    watchChanges: false
+    printErrors: false
+    atomicWrites: true
+  }
+
+  FileView {
+    id: separatorHoldFile
+    path: root.separatorHoldPath
+    watchChanges: false
+    printErrors: false
+    atomicWrites: true
+  }
+
   Process {
     id: windowMoveBindProc
   }
@@ -2604,6 +2895,20 @@ Item {
         required property var modelData
         screen: modelData
       }
+    }
+  }
+
+  WelcomePanel {
+    screen: {
+      var name = ""
+      try {
+        var mon = Hyprland.focusedMonitor
+        if (mon && mon.name) name = String(mon.name)
+      } catch (e) {}
+      var found = root.screenNamed(name)
+      if (found) return found
+      var screens = Quickshell.screens || []
+      return screens.length ? screens[0] : null
     }
   }
 
@@ -2740,12 +3045,48 @@ Item {
     WlrLayershell.namespace: "drace3000-bottom-dock"
     WlrLayershell.layer: WlrLayer.Top
     readonly property bool verticalBar: dockWindow.screenEdge !== "bottom"
+    // Read in this binding, not only inside panelInsets. A width that arrives
+    // after the first paint has to recenter the bar without a separator drag.
+    readonly property int outputWidth: dockWindow.screen ? dockWindow.screen.width : 0
+    readonly property int outputHeight: dockWindow.screen ? dockWindow.screen.height : 0
+    // Extra vertical length so the gear is fully inside a side bar. It only
+    // grows, from the gear's real position, and shrinks again when the
+    // buttons above it no longer need the room.
+    property int gearExtra: 0
+    function syncGearExtra() {
+      if (!verticalBar || !globeToggle || !globeToggle.gearItem || chrome.height < 1) {
+        if (!verticalBar && gearExtra !== 0) gearExtra = 0
+        return
+      }
+      var gear = globeToggle.gearItem
+      var _y = globeToggle.y + gear.y
+      var _h = gear.height
+      var mapped = gear.mapToItem(chrome, 0, _h)
+      if (!mapped) return
+      var overflow = Math.ceil(mapped.y + Style.space(12) - chrome.height)
+      if (overflow > 1)
+        gearExtra = gearExtra + overflow
+      else if (overflow < -40)
+        gearExtra = Math.max(0, gearExtra + overflow)
+    }
     readonly property var insets: {
       var _tick = root.resizePreviewTick
-      return root.panelInsets(dockWindow.screen, screenLayout, screenLook)
+      var _epoch = root.layoutEpoch
+      var _w = outputWidth
+      var _h = outputHeight
+      var _layout = screenLayout
+      var _look = screenLook
+      var _extra = gearExtra
+      var base = root.panelInsets(dockWindow.screen, _layout, _look)
+      if (!(verticalBar && _extra > 0)) return base
+      var available = Math.max(1, outputHeight - root.endGap)
+      var fitted = Math.min(available, base.fitted + _extra)
+      var slack = Math.max(0, available - fitted)
+      var half = Math.floor(slack / 2)
+      return { lead: root.endGap + half, trail: slack - half, fitted: fitted }
     }
     anchors.left: verticalBar ? dockWindow.screenEdge === "left" : true
-    anchors.right: verticalBar ? dockWindow.screenEdge === "right" : true
+    anchors.right: verticalBar ? dockWindow.screenEdge === "right" : outputWidth > 0
     anchors.top: verticalBar
     anchors.bottom: true
     readonly property bool resizePinned: root.resizeFrozenLead >= 0 && dockWindow.screenWorkspaceId === root.workspaceId
@@ -2803,6 +3144,13 @@ Item {
     readonly property color screenFill: root.fillForLook(screenLook)
     readonly property bool screenShowTips: screenLook.showTips !== false
 
+    Timer {
+      interval: 150
+      repeat: true
+      running: dockWindow.verticalBar
+      onTriggered: dockWindow.syncGearExtra()
+    }
+
     HoverHandler {
       onHoveredChanged: {
         if (hovered && dockWindow.screen)
@@ -2844,9 +3192,7 @@ Item {
         property real dragW: 0
         property real dragH: 0
 
-        function superDrag(mouse) {
-          return mouse.button === Qt.LeftButton && (mouse.modifiers & Qt.MetaModifier) !== 0
-        }
+        cursorShape: edgeDrag ? Qt.ClosedHandCursor : Qt.ArrowCursor
 
         function trackEdge(localX, localY) {
           var pt = root.panelPointToScreen(dockWindow, localX, localY)
@@ -2865,9 +3211,18 @@ Item {
           root.showIconTip(dockWindow.screen, g.x, g.y, root.blankBarTip)
         }
         onPressed: function(mouse) {
-          if (!superDrag(mouse)) {
-            if (mouse.button !== Qt.RightButton)
-              mouse.accepted = false
+          if (mouse.button === Qt.RightButton) return
+          if (mouse.button !== Qt.LeftButton) {
+            mouse.accepted = false
+            return
+          }
+          if (root.separatorHoldsBar || root.resizeButtonDown) {
+            mouse.accepted = false
+            return
+          }
+          var origin = root.pointerGlobal(dockWindow, mouse.x, mouse.y)
+          if (root.pointerOverSeparator(origin.x, origin.y)) {
+            mouse.accepted = false
             return
           }
           var pt = root.panelPointToScreen(dockWindow, mouse.x, mouse.y)
@@ -2880,10 +3235,14 @@ Item {
           dragH = pt.h
           root.barEdgeDragging = true
           root.armReveal(dockWindow.screen)
-          root.showEdgeHint(dockWindow.screen, pt.x, pt.y, dockWindow.screenEdge)
+          root.hideIconTip()
           mouse.accepted = true
         }
         onPositionChanged: function(mouse) {
+          if (root.separatorHoldsBar || root.resizeButtonDown) {
+            edgeDrag = false
+            return
+          }
           if (edgeDrag && (mouse.buttons & Qt.LeftButton)) {
             trackEdge(mouse.x, mouse.y)
             return
@@ -2897,14 +3256,10 @@ Item {
         }
         onReleased: function(mouse) {
           if (!edgeDrag) return
-          trackEdge(mouse.x, mouse.y)
           edgeDrag = false
-          var edge = dockWindow.screenEdge
-          if (dragW > 1 && dragH > 1)
-            edge = root.edgeFromDrag(dockWindow.screenEdge, dragX0, dragY0, dragX1, dragY1, dragW, dragH)
-          root.barEdgeDragging = false
-          root.setBarEdge(edge, dockWindow.screen)
-          root.hideIconTip()
+          // Placement comes from the compositor drag, which uses the real
+          // pointer. Local coordinates after the pointer leaves this strip
+          // read an inward drag as a jump to the opposite edge.
         }
         onExited: {
           if (root.tipText === root.blankBarTip)
@@ -3010,31 +3365,32 @@ Item {
           return count ? { section: "0", index: 0 } : null
         }
 
-        function packedStart(sectionItem) {
+        // Place sections from the saved spans. Sibling item widths are still
+        // 0 while the row is built, and reading those piled every icon at the
+        // left edge until a separator drag ran this again.
+        function alongOrigin(index) {
+          var live = root.layoutForWorkspaceKey(dockWindow.screenWorkspaceId)
+          var sections = live && live.sections ? live.sections : []
+          var gap = dockWindow.screenGroupGap
+          var slot = dockWindow.screenIconSlot
+          var keybind = dockWindow.screenKeybindSlot
+          var iconGap = Style.space(4)
           var pos = 0
-          var placed = false
-          var count = sectionRepeater.count
-          for (var i = 0; i < count; i++) {
-            var sec = sectionByIndex(i)
-            if (!sec) continue
-            var span = dockRow.vertical ? sec.implicitHeight : sec.implicitWidth
-            if (sec === sectionItem)
-              return pos
-            if (span <= 0) continue
-            pos += span
-            placed = true
+          var n = Math.max(0, Math.min(Math.round(Number(index) || 0), sections.length))
+          for (var i = 0; i < n; i++) {
+            var sec = sections[i] || {}
+            var items = sec.items || []
+            var stored = Math.max(0, Math.round(Number(sec.span) || 0))
+            var content = 0
+            for (var j = 0; j < items.length; j++) {
+              var item = items[j]
+              content += item && String(item.kind || "") === "keybind" ? keybind : slot
+            }
+            if (items.length > 1) content += iconGap * (items.length - 1)
+            var lead = i > 0 ? gap : 0
+            pos += lead + Math.max(stored, content)
           }
           return pos
-        }
-
-        function globeStart() {
-          var count = sectionRepeater.count
-          if (!count) return 0
-          var last = sectionByIndex(count - 1)
-          if (!last) return 0
-          var pos = packedStart(last)
-          var span = dockRow.vertical ? last.implicitHeight : last.implicitWidth
-          return pos + span
         }
 
         function trackDragAt(chromeX, chromeY) {
@@ -3056,14 +3412,34 @@ Item {
             leadGap: index > 0 ? dockWindow.screenGroupGap : 0
             sectionSpan: {
               var _tick = root.resizePreviewTick
+              var _epoch = root.layoutEpoch
+              var _layout = root.layout
+              var _maps = root.workspaceLayouts
+              var _ws = root.workspaceId
               var live = root.layoutForWorkspaceKey(dockWindow.screenWorkspaceId)
               var sections = live && live.sections ? live.sections : null
               var sec = sections ? sections[index] : null
-              if (sec) return Math.max(0, Math.round(Number(sec.span) || 0))
-              return Math.max(0, Math.round(Number(modelData.span) || 0))
+              var liveSpan = sec ? Math.max(0, Math.round(Number(sec.span) || 0)) : 0
+              var modelSpan = Math.max(0, Math.round(Number(modelData && modelData.span) || 0))
+              // A separator drag writes the preview onto the live section.
+              // After login, either copy of the saved span is enough.
+              if (root.resizeBoundaryIndex >= 0) return liveSpan
+              return liveSpan > 0 ? liveSpan : modelSpan
             }
-            x: dockRow.vertical ? (parent.width - width) / 2 : dockRow.packedStart(sectionItem)
-            y: dockRow.vertical ? dockRow.packedStart(sectionItem) : (parent.height - height) / 2
+            x: {
+              var _layout = dockWindow.screenLayout
+              var _tick = root.resizePreviewTick
+              var _slot = dockWindow.screenIconSlot
+              var _gap = dockWindow.screenGroupGap
+              return dockRow.vertical ? (parent.width - width) / 2 : dockRow.alongOrigin(index)
+            }
+            y: {
+              var _layout = dockWindow.screenLayout
+              var _tick = root.resizePreviewTick
+              var _slot = dockWindow.screenIconSlot
+              var _gap = dockWindow.screenGroupGap
+              return dockRow.vertical ? dockRow.alongOrigin(index) : (parent.height - height) / 2
+            }
             width: implicitWidth
             height: implicitHeight
             model: modelData.items || []
@@ -3078,6 +3454,7 @@ Item {
         }
 
         GlobalToggle {
+          id: globeToggle
           z: 5
           canResize: true
           slot: dockWindow.screenIconSlot
@@ -3085,8 +3462,22 @@ Item {
           screen: dockWindow.screen
           panel: dockWindow
           chromeItem: chrome
-          x: dockRow.vertical ? (parent.width - width) / 2 : dockRow.globeStart()
-          y: dockRow.vertical ? dockRow.globeStart() : (parent.height - height) / 2
+          x: {
+            var _layout = dockWindow.screenLayout
+            var _tick = root.resizePreviewTick
+            var _slot = dockWindow.screenIconSlot
+            var _gap = dockWindow.screenGroupGap
+            var count = _layout && _layout.sections ? _layout.sections.length : 0
+            return dockRow.vertical ? (parent.width - width) / 2 : dockRow.alongOrigin(count)
+          }
+          y: {
+            var _layout = dockWindow.screenLayout
+            var _tick = root.resizePreviewTick
+            var _slot = dockWindow.screenIconSlot
+            var _gap = dockWindow.screenGroupGap
+            var count = _layout && _layout.sections ? _layout.sections.length : 0
+            return dockRow.vertical ? dockRow.alongOrigin(count) : (parent.height - height) / 2
+          }
         }
       }
 
@@ -3174,6 +3565,73 @@ Item {
           }
         }
       }
+
+      // Upper-left drag grip. Sized past the corner radius so it covers that
+      // rounded corner, and clipped to the bar outline so it does not stick out.
+      Item {
+        id: cornerDragMark
+        z: 40
+        readonly property real corner: chrome.topLeftRadius
+        width: Math.min(parent.height, Math.max(corner, Style.space(26)))
+        height: width
+        anchors.left: parent.left
+        anchors.top: parent.top
+
+        Canvas {
+          id: cornerDragCanvas
+          anchors.fill: parent
+          property color barFill: dockWindow.screenFill
+          onBarFillChanged: requestPaint()
+          onPaint: {
+            var ctx = getContext("2d")
+            var w = width
+            var h = height
+            ctx.clearRect(0, 0, w, h)
+            if (w < 4 || h < 4) return
+            var radius = Math.min(cornerDragMark.corner, w, h)
+            ctx.save()
+            ctx.beginPath()
+            ctx.moveTo(0, h)
+            ctx.lineTo(0, radius)
+            ctx.arc(radius, radius, radius, Math.PI, -Math.PI / 2, true)
+            ctx.lineTo(w, 0)
+            ctx.lineTo(w, h)
+            ctx.closePath()
+            ctx.clip()
+
+            var fill = barFill
+            var lum = fill.r * 0.3 + fill.g * 0.59 + fill.b * 0.11
+            var light = lum > 0.62
+            var mark = light ? Qt.rgba(0.08, 0.08, 0.1, 1) : Qt.rgba(1, 1, 1, 1)
+            var halo = light ? Qt.rgba(1, 1, 1, 0.9) : Qt.rgba(0, 0, 0, 0.55)
+            var dot = Math.max(1.6, Math.round(w * 0.07))
+            var gap = dot * 2.15
+            var cols = 2
+            var rows = 3
+            var gridW = cols * dot * 2 + (cols - 1) * (gap - dot * 2)
+            var gridH = rows * dot * 2 + (rows - 1) * (gap - dot * 2)
+            var x0 = Math.max(radius * 0.45, (w - gridW) * 0.28)
+            var y0 = Math.max(radius * 0.28, (h - gridH) * 0.22)
+            for (var row = 0; row < rows; row++) {
+              for (var col = 0; col < cols; col++) {
+                var cx = x0 + dot + col * gap
+                var cy = y0 + dot + row * gap
+                ctx.beginPath()
+                ctx.arc(cx, cy, dot + 0.8, 0, Math.PI * 2)
+                ctx.fillStyle = halo
+                ctx.fill()
+                ctx.beginPath()
+                ctx.arc(cx, cy, dot, 0, Math.PI * 2)
+                ctx.fillStyle = mark
+                ctx.fill()
+              }
+            }
+            ctx.restore()
+          }
+          onWidthChanged: requestPaint()
+          onHeightChanged: requestPaint()
+        }
+      }
     }
   }
 
@@ -3185,6 +3643,7 @@ Item {
     property var panel: null
     property Item chromeItem: null
     property bool canResize: false
+    property Item gearItem: gearHit
     readonly property color ink: root.globalChanges ? "#39FF14" : "#FF3131"
     readonly property color barColor: panel && panel.screenFill ? panel.screenFill : root.barFill
     readonly property int gap: Style.space(8)
@@ -3208,16 +3667,54 @@ Item {
         height: toggleRoot.upright ? toggleRoot.ruleLength : toggleRoot.rule
       }
 
+      property string zoneId: ""
+      function reportZone() {
+        if (!zoneId.length) return
+        var rect = toggleRoot.canResize
+          ? root.separatorScreenRect(toggleRoot.panel, toggleRoot.chromeItem, tailRule)
+          : null
+        root.noteSeparatorZone(zoneId, rect)
+      }
+      // Retrack when the bar slides, the screen moves, or this grip moves.
+      property real zoneWatch: {
+        var panel = toggleRoot.panel
+        var slide = panel ? Number(panel.localSlide) || 0 : 0
+        var sx = panel && panel.screen ? Number(panel.screen.x) || 0 : 0
+        var sy = panel && panel.screen ? Number(panel.screen.y) || 0 : 0
+        var lead = panel && panel.insets ? Number(panel.insets.lead) || 0 : 0
+        return slide + sx + sy + lead + x + y + width + height + toggleRoot.x + toggleRoot.y + (toggleRoot.visible ? 1 : 0) + (toggleRoot.canResize ? 1 : 0)
+      }
+      onZoneWatchChanged: reportZone()
+      Component.onCompleted: {
+        root.separatorSerial = root.separatorSerial + 1
+        zoneId = "sep" + root.separatorSerial
+        reportZone()
+      }
+      Component.onDestruction: if (zoneId.length) root.noteSeparatorZone(zoneId, null)
+
       MouseArea {
         anchors.fill: parent
         enabled: toggleRoot.canResize
         hoverEnabled: true
-        cursorShape: toggleRoot.upright ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        preventStealing: true
+        cursorShape: root.separatorGripLost
+          ? Qt.ArrowCursor
+          : (toggleRoot.upright ? Qt.SizeHorCursor : Qt.SizeVerCursor)
         acceptedButtons: Qt.LeftButton
         onPressed: function(mouse) {
+          // Leaving the bar aborts this press. Re-entering while it is still
+          // held must not arm the resize cursor or start the drag again.
+          if (root.separatorGripLost) {
+            mouse.accepted = true
+            return
+          }
+          root.separatorGripLost = false
+          root.armSeparatorBarHold()
           root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
           if (!toggleRoot.chromeItem) return
           var mapped = mapToItem(toggleRoot.chromeItem, mouse.x, mouse.y)
+          root.separatorPressX = mapped.x
+          root.separatorPressY = mapped.y
           root.beginTailResize(toggleRoot.panel, toggleRoot.upright ? mapped.x : mapped.y)
           mouse.accepted = true
         }
@@ -3231,17 +3728,37 @@ Item {
             if (root.resizeTail) root.endSectionResize()
             return
           }
-          if (!root.resizeTail)
+          if (root.separatorOutsideChrome(toggleRoot.chromeItem, mapped.x, mapped.y)
+              || root.separatorGripLost || !containsMouse) {
+            if (root.resizeTail) root.abandonSeparatorDrag()
+            return
+          }
+          if (root.separatorHoldsBar && !root.separatorDragAlong(toggleRoot.upright, mapped.x, mapped.y)) {
+            if (root.separatorOutsideChrome(toggleRoot.chromeItem, mapped.x, mapped.y))
+              root.abandonSeparatorDrag()
+            return
+          }
+          if (root.separatorGripLost) return
+          if (!root.resizeTail) {
+            root.separatorPressX = mapped.x
+            root.separatorPressY = mapped.y
             root.beginTailResize(toggleRoot.panel, along)
-          else
+          } else {
             root.updateSectionResize(toggleRoot.panel, along)
+          }
         }
-        onExited: if (!pressed && root.resizeTail) root.endSectionResize()
+        onExited: {
+          if (!root.resizeTail) return
+          if (pressed || root.separatorHoldsBar) root.abandonSeparatorDrag()
+          else root.endSectionResize()
+        }
         onReleased: function(mouse) {
           root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
-          if (!root.superDown) root.endSectionResize()
+          if (!root.superDown && root.resizeTail) root.endSectionResize()
         }
-        onCanceled: if (root.resizeTail) root.endSectionResize()
+        onCanceled: {
+          if (root.resizeTail) root.abandonSeparatorDrag()
+        }
       }
     }
 
@@ -3540,30 +4057,6 @@ Item {
     }
 
     Item {
-      // Stay under the icons. The count comes from the icon repeater so the
-      // mark disappears as soon as a delegate exists, not from a stale length.
-      visible: sectionIcons.count === 0
-      enabled: false
-      z: 0
-      x: sectionRoot.vertical ? 0 : sectionRoot.leadGap
-      y: sectionRoot.vertical ? sectionRoot.leadGap : 0
-      width: sectionRoot.vertical ? parent.width : Math.max(0, parent.width - sectionRoot.leadGap)
-      height: sectionRoot.vertical ? Math.max(0, parent.height - sectionRoot.leadGap) : parent.height
-
-      Text {
-        anchors.centerIn: parent
-        textFormat: Text.PlainText
-        text: (sectionRoot.sectionIndex + 1) + "/" + Math.max(1, sectionRoot.sectionCount)
-        color: root.darkerTones(sectionRoot.panelWindow && sectionRoot.panelWindow.screenFill ? sectionRoot.panelWindow.screenFill : root.barFill, 5)
-        font.family: Style.font.family
-        font.pixelSize: Math.max(10, Math.round(sectionRoot.iconSlot * 0.42)) + 1
-        font.bold: false
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-      }
-    }
-
-    Item {
       id: sectionRule
       visible: Number(sectionRoot.sectionName) > 0
       z: 8
@@ -3582,16 +4075,47 @@ Item {
         height: sectionRoot.vertical ? Math.max(2, Style.space(1)) : Math.round(sectionRoot.iconSlot * 0.72)
       }
 
+      property string zoneId: ""
+      function reportZone() {
+        if (!zoneId.length) return
+        root.noteSeparatorZone(zoneId, root.separatorScreenRect(sectionRoot.panelWindow, sectionRoot.chromeItem, sectionRule))
+      }
+      property real zoneWatch: {
+        var panel = sectionRoot.panelWindow
+        var slide = panel ? Number(panel.localSlide) || 0 : 0
+        var sx = panel && panel.screen ? Number(panel.screen.x) || 0 : 0
+        var sy = panel && panel.screen ? Number(panel.screen.y) || 0 : 0
+        var lead = panel && panel.insets ? Number(panel.insets.lead) || 0 : 0
+        return slide + sx + sy + lead + x + y + width + height + sectionRoot.x + sectionRoot.y + (visible ? 1 : 0)
+      }
+      onZoneWatchChanged: reportZone()
+      Component.onCompleted: {
+        root.separatorSerial = root.separatorSerial + 1
+        zoneId = "sep" + root.separatorSerial
+        reportZone()
+      }
+      Component.onDestruction: if (zoneId.length) root.noteSeparatorZone(zoneId, null)
+
       MouseArea {
         anchors.fill: parent
         hoverEnabled: true
-        cursorShape: sectionRoot.vertical ? Qt.SizeVerCursor : Qt.SizeHorCursor
+        cursorShape: root.separatorGripLost
+          ? Qt.ArrowCursor
+          : (sectionRoot.vertical ? Qt.SizeVerCursor : Qt.SizeHorCursor)
         acceptedButtons: Qt.LeftButton
         preventStealing: true
         onPressed: function(mouse) {
+          if (root.separatorGripLost) {
+            mouse.accepted = true
+            return
+          }
+          root.separatorGripLost = false
+          root.armSeparatorBarHold()
           root.resizeButtonDown = true
           root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
           var mapped = mapToItem(sectionRoot.chromeItem, mouse.x, mouse.y)
+          root.separatorPressX = mapped.x
+          root.separatorPressY = mapped.y
           var along = sectionRoot.vertical ? mapped.y : mapped.x
           root.beginSectionResize(sectionRoot.panelWindow, sectionRule.boundary, along)
           mouse.accepted = true
@@ -3609,21 +4133,42 @@ Item {
             return
           }
           if (root.resizeTail) return
-          if (root.resizeBoundaryIndex < 0)
+          if (root.separatorOutsideChrome(sectionRoot.chromeItem, mapped.x, mapped.y)
+              || root.separatorGripLost || !containsMouse) {
+            if (root.resizeBoundaryIndex === sectionRule.boundary)
+              root.abandonSeparatorDrag()
+            return
+          }
+          if (root.separatorHoldsBar && !root.separatorDragAlong(!sectionRoot.vertical, mapped.x, mapped.y)) {
+            if (root.separatorOutsideChrome(sectionRoot.chromeItem, mapped.x, mapped.y))
+              root.abandonSeparatorDrag()
+            return
+          }
+          if (root.separatorGripLost) return
+          if (root.resizeBoundaryIndex < 0) {
+            root.separatorPressX = mapped.x
+            root.separatorPressY = mapped.y
             root.beginSectionResize(sectionRoot.panelWindow, sectionRule.boundary, along)
-          else if (root.resizeBoundaryIndex === sectionRule.boundary)
+          } else if (root.resizeBoundaryIndex === sectionRule.boundary) {
             root.updateSectionResize(sectionRoot.panelWindow, along)
+          }
+        }
+        onExited: {
+          if (root.resizeTail) return
+          if (root.resizeBoundaryIndex !== sectionRule.boundary) return
+          if (pressed || root.resizeButtonDown || root.separatorHoldsBar)
+            root.abandonSeparatorDrag()
+          else
+            root.endSectionResize()
         }
         onReleased: function(mouse) {
-          root.resizeButtonDown = false
           root.superDown = (mouse.modifiers & Qt.MetaModifier) !== 0
           if (!root.superDown && !root.resizeTail && root.resizeBoundaryIndex === sectionRule.boundary)
             root.endSectionResize()
         }
         onCanceled: {
-          root.resizeButtonDown = false
           if (!root.resizeTail && root.resizeBoundaryIndex === sectionRule.boundary)
-            root.endSectionResize()
+            root.abandonSeparatorDrag()
         }
       }
     }
@@ -4010,6 +4555,69 @@ Item {
     }
   }
 
+  component WelcomePanel: PanelWindow {
+    id: welcomeWindow
+    visible: root.welcomeOpen && welcomeWindow.screen
+    exclusionMode: ExclusionMode.Ignore
+    color: "transparent"
+    surfaceFormat.opaque: false
+    WlrLayershell.namespace: "drace3000-bottom-dock-welcome"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    anchors { left: true; right: true; top: true; bottom: true }
+    mask: Region { item: welcomeCard }
+
+    Rectangle {
+      id: welcomeCard
+      radius: Style.space(14)
+      color: root.surface
+      border.color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.22)
+      border.width: 1
+      width: welcomeText.implicitWidth + Style.space(28) + welcomeClose.width
+      height: Math.max(welcomeClose.height + Style.space(16), welcomeText.implicitHeight + Style.space(24))
+      anchors.centerIn: parent
+      anchors.horizontalCenterOffset: {
+        var edge = root.barEdge
+        var cross = root.barCross
+        if (edge === "left") return cross / 2
+        if (edge === "right") return -cross / 2
+        return 0
+      }
+      anchors.verticalCenterOffset: {
+        var top = root.endGap
+        var bottom = root.barEdge === "bottom" ? root.barCross : 0
+        return (top - bottom) / 2
+      }
+
+      Text {
+        id: welcomeText
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(16)
+        anchors.right: welcomeClose.left
+        anchors.rightMargin: Style.space(8)
+        textFormat: Text.PlainText
+        text: "Select gear icon to customize task bar"
+        color: root.ink
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        horizontalAlignment: Text.AlignLeft
+        verticalAlignment: Text.AlignVCenter
+        elide: Text.ElideNone
+      }
+
+      CircleGlyphButton {
+        id: welcomeClose
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        glyph: "×"
+        onActivated: root.dismissWelcome()
+      }
+    }
+  }
+
   component TipPanel: PanelWindow {
     id: tipWindow
     readonly property bool forScreen: root.tipScreen === tipWindow.screen
@@ -4020,7 +4628,7 @@ Item {
       return root.lookFor(root.workspaceIdForScreen(_screen))
     }
     readonly property var tipMetrics: root.metricsForLook(tipLook)
-    visible: root.tipVisible && forScreen && root.tipText.length > 0
+    visible: root.tipVisible && forScreen && (root.tipText.length > 0 || root.tipStop)
     exclusionMode: ExclusionMode.Ignore
     color: "transparent"
     surfaceFormat.opaque: false
@@ -4042,9 +4650,10 @@ Item {
         if (!root.tipItem) return 0
         return root.itemRunningCount(root.tipItem, root.tipItemScreen, _gen)
       }
+      visible: !root.tipStop
       width: tipLabel.implicitWidth + (tipCountLabel.visible ? tipCountLabel.implicitWidth + Style.space(6) : 0) + tipPadX
       height: Math.max(Style.space(28), Math.max(tipLabel.implicitHeight, tipCountLabel.implicitHeight) + tipPadY)
-      radius: Style.cornerRadius
+      radius: root.barEdgeDragging ? height / 2 : Style.cornerRadius
       color: Color.tooltip.background
       border.color: Color.tooltip.border
       border.width: Math.max(1, Style.normalBorderWidth)
@@ -4066,9 +4675,11 @@ Item {
       Row {
         anchors.centerIn: parent
         spacing: Style.space(6)
+        visible: !root.tipStop
 
         Text {
           id: tipLabel
+          visible: root.tipText.length > 0
           textFormat: Text.PlainText
           text: root.tipText
           color: Color.tooltip.text
@@ -4087,6 +4698,32 @@ Item {
           font.pixelSize: Style.font.bodySmall
           verticalAlignment: Text.AlignVCenter
         }
+      }
+    }
+
+    Canvas {
+      id: stopMark
+      visible: root.tipStop
+      width: Style.space(22)
+      height: width
+      x: Math.min(Math.max(0, root.tipX), parent.width - width)
+      y: Math.min(Math.max(0, root.tipY - height / 2), parent.height - height)
+      onVisibleChanged: requestPaint()
+      onWidthChanged: requestPaint()
+      onPaint: {
+        var ctx = getContext("2d")
+        var s = width
+        ctx.clearRect(0, 0, s, s)
+        ctx.strokeStyle = "#e23d3d"
+        ctx.lineWidth = Math.max(2, s * 0.12)
+        ctx.lineCap = "round"
+        ctx.beginPath()
+        ctx.arc(s / 2, s / 2, s * 0.38, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.moveTo(s * 0.30, s * 0.70)
+        ctx.lineTo(s * 0.70, s * 0.30)
+        ctx.stroke()
       }
     }
   }
@@ -5093,45 +5730,6 @@ Item {
             text: "Remove section " + (root.menuSectionIndex + 1)
             onActivated: root.askRemoveSection(root.menuSectionIndex)
           }
-
-          Column {
-            visible: root.confirmRemoveOpen && !root.menuItem
-            width: parent.width
-            spacing: Style.space(8)
-
-            Text {
-              width: parent.width
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
-              text: "You about to remove section " + (root.confirmSectionIndex + 1)
-                    + " from Workspace " + root.workspaceId
-                    + " and all of its icon contents. To keep any icons move them to other sections first or they will be removed"
-                    + (root.globalSectionsActive() ? " The same section will be removed on every workspace." : "")
-              color: root.menuForeground
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-              Button {
-                text: "Cancel"
-                bordered: true
-                foreground: root.menuForeground
-                accent: Color.accent
-                fontFamily: Style.font.menuFamily
-                onClicked: root.cancelRemoveSection()
-              }
-              Button {
-                text: "Remove All"
-                bordered: true
-                foreground: root.menuForeground
-                accent: Color.accent
-                fontFamily: Style.font.menuFamily
-                onClicked: root.commitRemoveSection()
-              }
-            }
-          }
             }
           }
         }
@@ -5618,6 +6216,109 @@ Item {
             menuCard.resizing = false
             menuCard.park(menuCard.resizePinX, menuCard.resizePinY)
             root.persistSettings()
+          }
+        }
+      }
+    }
+
+    // Beside the settings card, never on top of it. Right side first, then
+    // left, then below, then above, with the top edges lined up when it sits
+    // to the side.
+    BorderSurface {
+      id: confirmCard
+      visible: root.confirmRemoveOpen && !root.menuItem && menuWindow.visible
+      z: 15
+      padding: Style.space(14)
+      readonly property real sideGap: Style.space(12)
+      readonly property real screenMargin: Style.space(8)
+      readonly property bool fitsRight: menuCard.x + menuCard.width + sideGap + width <= parent.width - screenMargin
+      readonly property bool fitsLeft: menuCard.x - sideGap - width >= screenMargin
+      readonly property bool fitsBelow: menuCard.y + menuCard.height + sideGap + height <= parent.height - screenMargin
+      width: Math.min(Style.space(380), Math.max(Style.space(280), confirmTitle.implicitWidth + contentLeftInset + contentRightInset))
+      height: confirmBody.implicitHeight + contentTopInset + contentBottomInset
+      radius: Style.cornerRadius
+      color: root.menuBackground
+      borderSpec: root.menuBorderSpec
+      x: {
+        var margin = screenMargin
+        if (fitsRight) return menuCard.x + menuCard.width + sideGap
+        if (fitsLeft) return menuCard.x - sideGap - width
+        return Math.min(Math.max(margin, menuCard.x), Math.max(margin, parent.width - width - margin))
+      }
+      y: {
+        var margin = screenMargin
+        if (fitsRight || fitsLeft)
+          return Math.min(Math.max(margin, menuCard.y), Math.max(margin, parent.height - height - margin))
+        if (fitsBelow) return menuCard.y + menuCard.height + sideGap
+        var above = menuCard.y - sideGap - height
+        if (above >= margin) return above
+        return Math.min(Math.max(margin, menuCard.y), Math.max(margin, parent.height - height - margin))
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: function() {}
+      }
+
+      Column {
+        id: confirmBody
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.leftMargin: confirmCard.contentLeftInset
+        anchors.rightMargin: confirmCard.contentRightInset
+        anchors.topMargin: confirmCard.contentTopInset
+        spacing: Style.space(10)
+
+        Text {
+          id: confirmTitle
+          width: parent.width
+          horizontalAlignment: Text.AlignLeft
+          wrapMode: Text.NoWrap
+          elide: Text.ElideRight
+          textFormat: Text.PlainText
+          text: "Section Removal Request"
+          color: root.menuForeground
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+        }
+
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignLeft
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          text: "You about to remove section " + (root.confirmSectionIndex + 1)
+                + " from Workspace " + root.workspaceId
+                + " and all of its icon contents. To keep any icons move them to other sections first or they will be removed"
+                + (root.globalSectionsActive() ? " The same section will be removed on every workspace." : "")
+          color: root.menuForeground
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Button {
+            text: "Cancel"
+            bordered: true
+            foreground: root.menuForeground
+            accent: Color.accent
+            fontFamily: Style.font.menuFamily
+            width: (parent.width - parent.spacing) / 2
+            onClicked: root.cancelRemoveSection()
+          }
+          Button {
+            text: "Remove All"
+            bordered: true
+            foreground: root.menuForeground
+            accent: Color.accent
+            fontFamily: Style.font.menuFamily
+            width: (parent.width - parent.spacing) / 2
+            onClicked: root.commitRemoveSection()
           }
         }
       }
@@ -6295,16 +6996,15 @@ Item {
                   "A keybind icon shows up to three letters. Hover shows its name. Left-click runs the shortcut.",
                   "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> and <b>−</b> sit directly to the right of the word Sections. <b>+</b> adds an empty section at the end.",
                   "The numbered circles under Sections are the sections themselves. Click a number to press it in. Click it again to release it. <b>−</b> stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
-                  "An empty section shows a faint <b>watermark</b>, such as 2/5: that section's number, then how many sections the bar has. The mark uses the task bar background, several tones darker, and disappears when an icon is placed in that section.",
-                  "An <b>empty section</b> is removed at once. A section that still has icons asks first. <b>Cancel</b> keeps it. <b>Remove All</b> deletes the section and those icons.",
-                  "Drag a <b>separator</b> to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. The resize cursor shows while the pointer is over the line. The section moves only while <b>Super</b> is held or the mouse button is down. Releasing both stops the move. A section will not shrink smaller than its icons.",
+                  "An <b>empty section</b> is removed at once. A section that still has icons opens a popup beside this window. <b>Cancel</b> keeps it. <b>Remove All</b> deletes the section and those icons.",
+                  "Drag a <b>separator</b> along the bar to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. On the bottom bar that direction is left and right. On a side bar it is up and down. The resize cursor shows while the pointer is over the line. Dragging off the task bar stops the resize, the pointer returns to a normal arrow, and the bar stays on its current edge. Moving back onto the bar while the button is still held does not resume that drag or bring the resize cursor back. Release the button before starting again. A section will not shrink smaller than its icons.",
                   "<b>Icon Size +</b> makes icons larger. <b>Icon Size −</b> makes them smaller. <b>Scroll</b> on the task bar does the same. Section widths scale with the icon size.",
                   "<b>Transparency +</b> makes the task bar more see-through. <b>Transparency −</b> makes it more solid. Hold <b>Alt and scroll</b> to do the same.",
                   "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme. The <b>gear</b> then takes that same color, three tones lighter. Hovering the gear lightens it further, and the highlight behind it uses the bar color.",
                   "<b>Icon popups</b> shows a name when you hover an icon. If that icon has a blinking underline, the popup also shows <b>(x)</b> to the right of the name, where x is how many of that item are open on this workspace.",
                   "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut.",
                   "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section. The moving picture stays on the screen where you started the drag.",
-                  "Hold <b>Super and drag</b> a blank part of the task bar to the left, the right, or the bottom to move the task bar there.",
+                  "<b>Drag</b> a blank part of the task bar to the left, the right, or the bottom to move it there. The resize cursor is a separator: a drag that starts there widens or narrows the section and leaves the bar on its current edge, with or without Super. When the pointer nears the top, a stop symbol appears. The task bar cannot sit on the top.",
                   "<b>Global Changes</b> is the switch on the right of that label. The <b>Icons</b> and <b>Sections</b> checkboxes sit directly under the words. A checked box shows a check mark. They are dimmed, and do nothing, while the switch is off.",
                   "With the switch on and <b>Icons</b> checked, adding, moving, renaming, or removing an icon applies to every workspace. Adding or moving an icon into a section number that another workspace does not have yet adds empty sections there until that number exists. If Icons is not checked, those edits stay on the workspace you are changing.",
                   "With the switch on and <b>Sections</b> checked, adding a section, removing one, or dragging a separator applies to every workspace. If Sections is not checked, those edits stay on this workspace.",
@@ -6329,7 +7029,7 @@ Item {
                   "A <b>mark</b> under an app means it is open.",
                   "The bar <b>slides away</b> until the pointer reaches the bottom edge.",
                   "Drag the <b>title</b> or the grip in the upper-left corner to move this menu. Drag the lower-right grip to resize it. The place and size are remembered.",
-                  "Hold <b>Super and drag</b> a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom."
+                  "<b>Drag</b> a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom. When the pointer nears the top, a stop symbol appears. The bar cannot sit on the top."
                 ]
                 delegate: Item {
                   id: featureRow

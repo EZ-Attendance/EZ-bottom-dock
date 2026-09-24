@@ -39,13 +39,13 @@ omarchy plugin remove drace3000.bottom-dock
 
 ### Auto-hide
 
-The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Hold Super and drag a blank part of the bar to move it to the left, the right, or the bottom.
+The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Drag a blank part of the bar off the strip to move it to the left, the right, or the bottom. Holding Super and dragging does the same. An empty bar also shows a short welcome: **Select gear icon to customize task bar**. It closes after five seconds, or when you click its X, and stays closed until the bar is empty again on another workspace or the next login.
 
 ### Numbered sections
 
 Each workspace can have up to eight numbered sections, or none. **+** adds an empty section at the end. Click a section number to press it in, then **−** removes it. An empty section is removed at once. A section that still has icons asks before it is deleted.
 
-Drag a separator to widen or narrow the section in front of it, including the separator beside the globe. The section moves only while **Super** is held or the mouse button is down. A section will not shrink smaller than its icons. This resize stays on the workspace you are changing, even when Global Changes is on.
+Drag a separator to widen or narrow the section in front of it, including the separator beside the globe. A press that starts on a separator resizes that section and does not move the bar. The section moves only while **Super** is held or the mouse button is down, and it stops if the pointer leaves the strip. A section will not shrink smaller than its icons. This resize stays on the workspace you are changing, even when Global Changes is on. Saved section widths and the bar’s screen edge are applied when the shell starts.
 
 ### Add apps, plugins, web links, and keybinds
 
@@ -65,7 +65,7 @@ Right-click the dock background, or click the **gear**:
 
 ### Drag and drop
 
-**Click and drag** an icon to move it along the bar, including into another numbered section. Hold **Super** and drag a blank part of the bar to the left, the right, or the bottom to move the bar there.
+**Click and drag** an icon to move it along the bar, including into another numbered section. Drag a blank part of the bar off the strip, or hold **Super** and drag it, to move the bar to the left, the right, or the bottom. A click that stays on an icon still launches that icon.
 
 ### Running and focused indicators
 
