@@ -1,6 +1,6 @@
 # EZ Bottom Dock
 
-Easy auto-hiding dock for apps, plugins, web links, and keybinds — with per-workspace layouts.
+Easy dock for apps, plugins, web links, and keybinds — with per-workspace layouts. A new install shows three blank sections. Icon popups are on. Auto-hide and Global Changes are off.
 
 Built for [Omarchy](https://omarchy.org) / Quickshell. Plugin id: `drace3000.bottom-dock`.
 
@@ -30,7 +30,7 @@ omarchy plugin remove drace3000.bottom-dock
 
 ## Quick start
 
-1. Move the pointer to the screen edge where the dock sits (bottom by default) to reveal it.
+1. The dock sits on the bottom of the screen. A new install has three blank sections, icon popups on, and both auto-hide and Global Changes off.
 2. When empty, the dock shows **Right click to start customization**.
 3. **Right-click** empty dock space to open the menu.
 4. Use **ADD** and **SETTINGS** to customize.
@@ -39,7 +39,7 @@ omarchy plugin remove drace3000.bottom-dock
 
 ### Auto-hide
 
-The dock stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Drag a blank part of the bar off the strip to move it to the left, the right, or the bottom. Holding Super and dragging does the same. An empty bar also shows a short welcome: **Select gear icon to customize task bar**. It closes after five seconds, or when you click its X, and stays closed until the bar is empty again on another workspace or the next login.
+Auto-hide starts off, so the dock stays on screen. Turn on **Auto hide task bar** and it stays hidden until you move the cursor to its screen edge. It stays open while you hover it, use menus, or drag icons. Drag a blank part of the bar off the strip to move it to the left, the right, or the bottom. Holding Super and dragging does the same. An empty bar also shows a short welcome: **Select gear icon to customize task bar**. The first time the dock is installed it stays up for two minutes, so it is still there after other windows, or until you click its X. On a later startup, if every section is still blank, it stays up for 15 seconds, or until you click its X. It stays closed until the bar is empty again on another workspace or the next login.
 
 ### Numbered sections
 
@@ -51,17 +51,18 @@ Drag a separator to widen or narrow the section in front of it, including the se
 
 Right-click the dock background, or click the **gear**:
 
-1. Choose **App**, **Plugin**, **Web**, or **KeyBind**.
+1. Choose **App**, **Plugin**, **Web**, **KeyBind**, or **System**.
 2. The numbers under those buttons choose which section receives the new icon.
 3. Complete the picker:
    - **App** — search and pick a desktop app
    - **Plugin** — pick a summonable Omarchy shell plugin (panels, menus, overlays, and many bar widgets)
    - **Web** — enter a name and URL
    - **KeyBind** — pick an Omarchy shortcut. The icon shows up to three letters. Hover shows the name. Left-click runs the shortcut.
+   - **System** — pick Logout, Lock, or Shutdown. The choice adds that icon to the numbered section and does not run the action. Left-click the icon on the bar to open its check. The action name is the title, the warnings sit under it, and **Cancel** and **Proceed** are the buttons. Cancel leaves the computer as it is. Proceed runs the action.
 
 ### Per-icon actions
 
-**Right-click an icon** to edit its label, choose its section, choose its workspaces, or remove it. The circled **i** opens help for that icon. The circled **X** closes the menu.
+**Right-click an icon** to edit its label, choose its section, choose its workspaces, or remove it. The information icon opens help for that icon. The circled **X** closes the menu.
 
 ### Drag and drop
 
@@ -81,7 +82,7 @@ The **globe** after the last section is the Global Changes switch. Neon green is
 
 ### Help
 
-The circled **i**, with no icon selected, opens task bar help. The search field highlights every match with a yellow background and jumps to the first one. The down arrow jumps to the next match. The circled **X** inside the search field clears the search.
+The information icon, with no icon selected, opens task bar help. The search field highlights every match with a yellow background and jumps to the first one. The down arrow jumps to the next match. The circled **X** inside the search field clears the search.
 
 ### Per-workspace layouts
 

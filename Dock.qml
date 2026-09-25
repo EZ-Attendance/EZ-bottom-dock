@@ -9,7 +9,9 @@ import qs.Commons
 import qs.Ui
 import "DockModel.js" as DockModel
 
-// Auto-hiding bottom dock with left / center / right app icons.
+// Bottom dock with left / center / right app icons.
+// A new install starts as three blank sections, icon popups on,
+// auto-hide off, and Global Changes off.
 // Empty layout shows "Right click to start customization".
 // Right-click an icon, then the info button, for help on what the dock does.
 // Icons, bar edge, size, color, popups, and auto-hide are stored per workspace.
@@ -23,10 +25,14 @@ Item {
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   property string home: Quickshell.env("HOME")
   property var shell: null
+  onShellChanged: {
+    if (shell && configReady)
+      persistSettings()
+  }
   property var manifest: null
   readonly property string pluginId: "drace3000.bottom-dock"
 
-  property bool autoHide: true
+  property bool autoHide: false
   property bool revealHeld: false
   // Output name whose dock is allowed to slide in. Other monitors stay hidden.
   property string revealScreenName: ""
@@ -35,8 +41,9 @@ Item {
   property bool pickerOpen: false
   property bool webOpen: false
   property bool dragging: false
-  property string pickerKind: "app" // "app" | "plugin" | "keybind"
+  property string pickerKind: "app" // "app" | "plugin" | "keybind" | "system"
   property var keybindCatalog: []
+  property var systemCatalog: DockModel.systemEntries()
 
   property var layout: DockModel.emptyLayout()
   property var defaultLayout: DockModel.emptyLayout()
@@ -72,6 +79,14 @@ Item {
   property string dropSection: ""
   property int menuSectionIndex: -1
   property bool confirmRemoveOpen: false
+  property bool systemConfirmOpen: false
+  property string systemConfirmMode: ""
+  property string systemConfirmTitle: ""
+  property var systemConfirmWarnings: []
+  property string systemConfirmExec: ""
+  property var systemConfirmItem: null
+  property int systemConfirmSection: 0
+  property bool systemConfirmReturnPicker: false
   property int confirmSectionIndex: -1
   property int removeSectionPick: -1
   property int resizeBoundaryIndex: -1
@@ -184,13 +199,17 @@ Item {
   property int tipRequest: 0
 
   readonly property bool hovered: hoverCount > 0
-  readonly property bool uiHeld: menuOpen || pickerOpen || webOpen || dragging || barEdgeDragging || welcomeOpen
+  readonly property bool uiHeld: menuOpen || pickerOpen || webOpen || systemConfirmOpen || dragging || barEdgeDragging || welcomeOpen
   readonly property bool layoutEmpty: DockModel.isEmpty(layout)
   property bool configReady: false
   property bool welcomeOpen: false
-  // Stays closed after the X or the five-second timer until icons come back,
+  // Stays closed after the X or the timer until icons come back,
   // the workspace changes, or the shell starts again on an empty bar.
   property bool welcomeHold: false
+  // Saved after the first shell start. Missing means this install is new.
+  property bool welcomeIntroduced: false
+  property bool firstRunWelcome: false
+  property bool _welcomeEpochSet: false
 
   readonly property int dockHeight: DockModel.dockHeightForIcons(iconSize)
   // Extra room on each side of the icons when the bar is on the left or right.
@@ -351,6 +370,29 @@ Item {
       fitted: fitted
     }
   }
+
+  // A popup that would cross the visible edges is shrunk until it fits,
+  // then slid so the whole card stays inside that area.
+  function containPopup(x, y, w, h, boundsW, boundsH, margin) {
+    var m = Math.max(0, Number(margin) || 0)
+    var bw = Number(boundsW) || 0
+    var bh = Number(boundsH) || 0
+    var nw = Math.max(1, Number(w) || 1)
+    var nh = Math.max(1, Number(h) || 1)
+    var nx = Number(x) || 0
+    var ny = Number(y) || 0
+    if (!(bw > 0) || !(bh > 0))
+      return { x: nx, y: ny, width: nw, height: nh }
+    var maxW = Math.max(1, bw - m * 2)
+    var maxH = Math.max(1, bh - m * 2)
+    if (nw > maxW) nw = maxW
+    if (nh > maxH) nh = maxH
+    var maxX = Math.max(m, bw - nw - m)
+    var maxY = Math.max(m, bh - nh - m)
+    nx = Math.min(Math.max(m, nx), maxX)
+    ny = Math.min(Math.max(m, ny), maxY)
+    return { x: nx, y: ny, width: nw, height: nh }
+  }
   readonly property color ink: Color.bar.text
   // Selected-window border from the current theme's hyprland.lua.
   property color activeBorder: Color.accent
@@ -418,9 +460,12 @@ Item {
   readonly property var pickerApps: DockModel.sortedDesktopEntries(desktopApps, pickerQuery)
   readonly property var pickerPlugins: DockModel.filterPlugins(pluginCatalog, pickerQuery)
   readonly property var pickerKeybinds: DockModel.filterKeybinds(keybindCatalog, pickerQuery)
+  readonly property var pickerSystem: DockModel.filterSystem(systemCatalog, pickerQuery)
   readonly property var pickerModel: pickerKind === "plugin"
     ? pickerPlugins
-    : pickerKind === "keybind" ? pickerKeybinds : pickerApps
+    : pickerKind === "keybind" ? pickerKeybinds
+    : pickerKind === "system" ? pickerSystem
+    : pickerApps
   readonly property var hyprWorkspaces: Hyprland.workspaces
   readonly property var listedWorkspaceIds: {
     var ids = [1, 2, 3, 4, 5]
@@ -457,7 +502,9 @@ Item {
     ? ("Add plugin → " + (pendingSection + 1))
     : pickerKind === "keybind"
       ? "Keybindings"
-      : ("Add app → " + (pendingSection + 1))
+      : pickerKind === "system"
+        ? ("Add system → " + (pendingSection + 1))
+        : ("Add app → " + (pendingSection + 1))
 
   function open(_payload) {}
   function close() { root.closeMenus() }
@@ -861,6 +908,13 @@ Item {
     webUrl = ""
     webFocus = "name"
     confirmRemoveOpen = false
+    systemConfirmOpen = false
+    systemConfirmMode = ""
+    systemConfirmTitle = ""
+    systemConfirmWarnings = []
+    systemConfirmExec = ""
+    systemConfirmItem = null
+    systemConfirmReturnPicker = false
     confirmSectionIndex = -1
     removeSectionPick = -1
     menuSectionIndex = -1
@@ -1112,6 +1166,7 @@ Item {
     }
     if (welcomeOpen || welcomeHold) return
     welcomeOpen = true
+    welcomeTimer.interval = DockModel.welcomeTimeoutMs(firstRunWelcome)
     welcomeTimer.restart()
   }
 
@@ -1441,6 +1496,7 @@ Item {
         globalChanges: !!globalChanges,
         globalIcons: !!globalIcons,
         globalSections: !!globalSections,
+        welcomeIntroduced: !!welcomeIntroduced,
         workspaceLooks: DockModel.cloneLookMap(workspaceLooks),
         customMenu: {
           placed: !!customMenuPlaced,
@@ -1954,6 +2010,12 @@ Item {
       autoHide: cfg.autoHide !== false
     })
     workspaceLooks = DockModel.cloneLookMap(cfg.workspaceLooks)
+    if (!_welcomeEpochSet) {
+      firstRunWelcome = cfg.welcomeIntroduced !== true
+      _welcomeEpochSet = true
+    }
+    welcomeIntroduced = true
+    console.log("bottom-dock welcome " + (firstRunWelcome ? "install-2m" : "later-15s"))
     applyActiveLook(lookFor(workspaceId))
     materializeAllLayouts()
     _loadingConfig = false
@@ -2275,8 +2337,58 @@ Item {
     return !!(found && found.activated)
   }
 
-  function activateOrLaunch(item) {
+  function activateOrLaunch(item, screen) {
+    if (screen) menuScreen = screen
     launchItem(item)
+  }
+
+  function askSystemConfirm(item, screen) {
+    if (!item) return
+    var notice = DockModel.systemPrompt(item.id)
+    systemConfirmReturnPicker = pickerOpen && pickerKind === "system"
+    if (screen) menuScreen = screen
+    else ensureMenuScreen()
+    systemConfirmMode = "run"
+    systemConfirmTitle = String(notice.title || "System")
+    systemConfirmWarnings = notice.warnings || []
+    systemConfirmExec = String(item.exec || "")
+    systemConfirmItem = item
+    systemConfirmSection = pendingSection
+    systemConfirmOpen = true
+    if (systemConfirmReturnPicker) pickerOpen = false
+    menuOpen = false
+    webOpen = false
+    helpOpen = false
+    confirmRemoveOpen = false
+    hideIconTip()
+    armReveal(menuScreen)
+  }
+
+  function cancelSystemAction() {
+    var reopen = systemConfirmReturnPicker
+    systemConfirmOpen = false
+    systemConfirmMode = ""
+    systemConfirmExec = ""
+    systemConfirmItem = null
+    systemConfirmReturnPicker = false
+    if (reopen) {
+      pickerOpen = true
+      armReveal(menuScreen)
+      return
+    }
+    releaseRevealSoon()
+  }
+
+  function proceedSystemAction() {
+    var command = String(systemConfirmExec || "")
+    systemConfirmReturnPicker = false
+    systemConfirmOpen = false
+    systemConfirmMode = ""
+    systemConfirmExec = ""
+    systemConfirmItem = null
+    pickerOpen = false
+    if (command.length) Util.execDetached(command)
+    releaseRevealSoon()
   }
 
   function launchItem(item) {
@@ -2295,6 +2407,10 @@ Item {
     }
     if (item.kind === "web" && item.url) {
       Util.execArgv(["xdg-open", String(item.url)])
+      return
+    }
+    if (item.kind === "system") {
+      askSystemConfirm(item, menuScreen)
       return
     }
     // Same launch as Super+Space. Every click starts another instance on
@@ -2381,6 +2497,19 @@ Item {
     armReveal(menuScreen)
   }
 
+  function beginSystemAdd(section) {
+    pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
+    pickerKind = "system"
+    menuOpen = false
+    pickerQuery = ""
+    pickerSelectedIndex = 0
+    ensureMenuScreen()
+    pickerOpen = true
+    webOpen = false
+    refreshSystemCatalog()
+    armReveal(menuScreen)
+  }
+
   function beginWebAdd(section) {
     pendingSection = DockModel.groupCount(layout) ? DockModel.sectionIndex(section) : 0
     menuOpen = false
@@ -2420,9 +2549,19 @@ Item {
     closeMenus()
   }
 
+  function acceptSystem(row) {
+    if (!row) return
+    var section = pendingSection
+    var item = DockModel.makeSystemItem(row)
+    var span = spanFloor()
+    commitLayout(function(current) { return DockModel.addItemGrowing(current, section, item, span) }, "icons")
+    closeMenus()
+  }
+
   function acceptPickerRow(row) {
     if (pickerKind === "plugin") acceptPlugin(row)
     else if (pickerKind === "keybind") acceptKeybind(row)
+    else if (pickerKind === "system") acceptSystem(row)
     else acceptApp(row)
   }
 
@@ -2448,6 +2587,11 @@ Item {
   function refreshKeybinds() {
     if (!keybindListProc.running)
       keybindListProc.running = true
+  }
+
+  function refreshSystemCatalog() {
+    if (!systemGuardProc.running)
+      systemGuardProc.running = true
   }
 
   Process {
@@ -2494,6 +2638,18 @@ Item {
         } catch (e) {
           root.keybindCatalog = []
         }
+      }
+    }
+  }
+
+  Process {
+    id: systemGuardProc
+    command: ["bash", "-lc", "s=0; h=0; ! omarchy-toggle-enabled suspend-off && s=1; omarchy-hibernation-available && h=1; printf '%s %s\\n' \"$s\" \"$h\""]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parts = String(text || "").trim().split(/\s+/)
+        root.systemCatalog = DockModel.systemEntries()
       }
     }
   }
@@ -2551,8 +2707,9 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v30")
+    console.log("bottom-dock loaded search-v41")
     root.refreshPluginCatalog()
+    root.refreshSystemCatalog()
     root.refreshBackgroundPalette()
     root.requestClientSync()
     // Align with the live workspace once Hyprland IPC is ready.
@@ -2689,7 +2846,7 @@ Item {
       root.bgColorKey = ""
       root.bgColorHex = ""
       root.showTips = true
-      root.autoHide = true
+      root.autoHide = false
       root.barEdge = "bottom"
     }
   }
@@ -4539,7 +4696,7 @@ Item {
                 return
               }
               if (mouse.button === Qt.LeftButton)
-                root.activateOrLaunch(iconWrap.modelData)
+                root.activateOrLaunch(iconWrap.modelData, sectionRoot.hostScreen)
             }
             onCanceled: {
               if (root.dragging) root.cancelIconDrag()
@@ -4573,8 +4730,8 @@ Item {
       color: root.surface
       border.color: Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.22)
       border.width: 1
-      width: welcomeText.implicitWidth + Style.space(28) + welcomeClose.width
-      height: Math.max(welcomeClose.height + Style.space(16), welcomeText.implicitHeight + Style.space(24))
+      width: Math.min(welcomeText.implicitWidth + Style.space(28) + welcomeClose.width, Math.max(1, parent.width - Style.space(16)))
+      height: Math.min(Math.max(welcomeClose.height + Style.space(16), welcomeText.implicitHeight + Style.space(24)), Math.max(1, parent.height - Style.space(16)))
       anchors.centerIn: parent
       anchors.horizontalCenterOffset: {
         var edge = root.barEdge
@@ -4603,7 +4760,7 @@ Item {
         font.pixelSize: Style.font.body
         horizontalAlignment: Text.AlignLeft
         verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideNone
+        elide: Text.ElideRight
       }
 
       CircleGlyphButton {
@@ -4651,9 +4808,17 @@ Item {
         return root.itemRunningCount(root.tipItem, root.tipItemScreen, _gen)
       }
       visible: !root.tipStop
-      width: tipLabel.implicitWidth + (tipCountLabel.visible ? tipCountLabel.implicitWidth + Style.space(6) : 0) + tipPadX
-      height: Math.max(Style.space(28), Math.max(tipLabel.implicitHeight, tipCountLabel.implicitHeight) + tipPadY)
-      radius: root.barEdgeDragging ? height / 2 : Style.cornerRadius
+      readonly property real maxW: Math.max(1, parent.width - Style.space(8))
+      readonly property real maxH: Math.max(1, parent.height - Style.space(8))
+      readonly property real naturalW: tipLabel.implicitWidth + (tipCountLabel.visible ? tipCountLabel.implicitWidth + Style.space(6) : 0) + tipPadX
+      readonly property real naturalH: Math.max(Style.space(28), Math.max(tipLabel.implicitHeight, tipCountLabel.implicitHeight) + tipPadY)
+      width: Math.min(naturalW, maxW)
+      height: Math.min(naturalH, maxH)
+      clip: width + 1 < naturalW || height + 1 < naturalH
+      antialiasing: true
+      // Icon tips keep a real corner on every side. Style.cornerRadius follows
+      // Hyprland rounding, which is 0 here, so the text box would stay square.
+      radius: root.barEdgeDragging ? height / 2 : Math.min(height / 2, Style.space(10))
       color: Color.tooltip.background
       border.color: Color.tooltip.border
       border.width: Math.max(1, Style.normalBorderWidth)
@@ -4663,13 +4828,13 @@ Item {
           left = tipWindow.tipMetrics.barCross + Style.space(10)
         else if (!root.barEdgeDragging && tipWindow.tipMetrics.barEdge === "right")
           left = parent.width - tipWindow.tipMetrics.barCross - width - Style.space(10)
-        return Math.min(Math.max(Style.space(4), left), parent.width - width - Style.space(4))
+        return Math.min(Math.max(Style.space(4), left), Math.max(Style.space(4), parent.width - width - Style.space(4)))
       }
       y: {
         var top = root.tipY - height - Style.space(8)
         if (!root.barEdgeDragging && tipWindow.tipMetrics.barEdge !== "bottom")
           top = root.tipY - height / 2
-        return Math.min(Math.max(Style.space(4), top), parent.height - height - Style.space(4))
+        return Math.min(Math.max(Style.space(4), top), Math.max(Style.space(4), parent.height - height - Style.space(4)))
       }
 
       Row {
@@ -4875,8 +5040,38 @@ Item {
       readonly property real minBarH: Style.space(240)
       readonly property real minIconW: Style.space(220)
       readonly property real minIconH: Style.space(180)
-      readonly property real naturalW: Math.min(Style.space(380), Math.max(minBarW, parent.width - Style.space(24)))
+      readonly property real naturalW: Math.min(Style.space(460), Math.max(minBarW, parent.width - Style.space(24)))
       readonly property real naturalH: Math.min(barSettings.implicitHeight + barMenuTitle.height + contentTopInset + contentBottomInset + Style.space(8), Math.max(minBarH, parent.height - Style.space(16)))
+      readonly property real fitMargin: Style.space(8)
+      readonly property real desiredW: root.menuItem
+        ? (root.iconMenuSized ? Math.max(minIconW, root.iconMenuW) : Style.space(260))
+        : (root.customMenuSized ? Math.max(minBarW, root.customMenuW) : naturalW)
+      readonly property real desiredH: root.menuItem
+        ? (root.iconMenuSized ? Math.max(minIconH, root.iconMenuH) : (menuColumn.implicitHeight + contentTopInset + contentBottomInset))
+        : (root.customMenuSized ? Math.max(minBarH, root.customMenuH) : naturalH)
+      readonly property real desiredX: {
+        if (root.menuItem && root.iconMenuPlaced)
+          return root.iconMenuX
+        if (!root.menuItem && root.customMenuPlaced)
+          return root.customMenuX
+        var left = root.menuX - desiredW / 2
+        if (menuWindow.menuMetrics.barEdge === "left")
+          left = root.menuX + Style.space(8) - menuWindow.menuMetrics.barCross
+        else if (menuWindow.menuMetrics.barEdge === "right")
+          left = root.menuX - desiredW - Style.space(8)
+        return left
+      }
+      readonly property real desiredY: {
+        if (root.menuItem && root.iconMenuPlaced)
+          return root.iconMenuY
+        if (!root.menuItem && root.customMenuPlaced)
+          return root.customMenuY
+        var top = root.menuY - desiredH - Style.space(10)
+        if (menuWindow.menuMetrics.barEdge !== "bottom")
+          top = root.menuY - desiredH / 2
+        return top
+      }
+      readonly property var fitted: root.containPopup(desiredX, desiredY, desiredW, desiredH, parent.width, parent.height, fitMargin)
       property real dragPressX: 0
       property real dragPressY: 0
       property real dragOriginX: 0
@@ -4884,12 +5079,8 @@ Item {
       property bool resizing: false
       property real resizePinX: 0
       property real resizePinY: 0
-      width: root.menuItem
-        ? (root.iconMenuSized ? Math.min(Math.max(minIconW, root.iconMenuW), parent.width - Style.space(16)) : Style.space(260))
-        : (root.customMenuSized ? Math.min(Math.max(minBarW, root.customMenuW), parent.width - Style.space(16)) : naturalW)
-      height: root.menuItem
-        ? (root.iconMenuSized ? Math.min(Math.max(minIconH, root.iconMenuH), parent.height - Style.space(16)) : (menuColumn.implicitHeight + contentTopInset + contentBottomInset))
-        : (root.customMenuSized ? Math.min(Math.max(minBarH, root.customMenuH), parent.height - Style.space(16)) : naturalH)
+      width: fitted.width
+      height: fitted.height
       radius: Style.cornerRadius
       color: root.menuBackground
       borderSpec: root.menuBorderSpec
@@ -4909,45 +5100,19 @@ Item {
         park(dragOriginX + p.x - dragPressX, dragOriginY + p.y - dragPressY)
       }
       function park(px, py) {
-        var margin = Style.space(8)
-        var nx = Math.min(Math.max(margin, px), parent.width - width - margin)
-        var ny = Math.min(Math.max(margin, py), parent.height - height - margin)
+        var fit = root.containPopup(px, py, width, height, parent.width, parent.height, fitMargin)
         if (root.menuItem) {
-          root.iconMenuX = nx
-          root.iconMenuY = ny
+          root.iconMenuX = fit.x
+          root.iconMenuY = fit.y
           root.iconMenuPlaced = true
         } else {
-          root.customMenuX = nx
-          root.customMenuY = ny
+          root.customMenuX = fit.x
+          root.customMenuY = fit.y
           root.customMenuPlaced = true
         }
       }
-      x: {
-        var margin = Style.space(8)
-        if (resizing) return resizePinX
-        if (root.menuItem && root.iconMenuPlaced)
-          return Math.min(Math.max(margin, root.iconMenuX), parent.width - width - margin)
-        if (!root.menuItem && root.customMenuPlaced)
-          return Math.min(Math.max(margin, root.customMenuX), parent.width - width - margin)
-        var left = root.menuX - width / 2
-        if (menuWindow.menuMetrics.barEdge === "left")
-          left = root.menuX + Style.space(8) - menuWindow.menuMetrics.barCross
-        else if (menuWindow.menuMetrics.barEdge === "right")
-          left = root.menuX - width - Style.space(8)
-        return Math.min(Math.max(margin, left), parent.width - width - margin)
-      }
-      y: {
-        var margin = Style.space(8)
-        if (resizing) return resizePinY
-        if (root.menuItem && root.iconMenuPlaced)
-          return Math.min(Math.max(margin, root.iconMenuY), parent.height - height - margin)
-        if (!root.menuItem && root.customMenuPlaced)
-          return Math.min(Math.max(margin, root.customMenuY), parent.height - height - margin)
-        var top = root.menuY - height - Style.space(10)
-        if (menuWindow.menuMetrics.barEdge !== "bottom")
-          top = root.menuY - height / 2
-        return Math.min(Math.max(margin, top), parent.height - height - margin)
-      }
+      x: resizing ? resizePinX : fitted.x
+      y: resizing ? resizePinY : fitted.y
 
       Column {
         id: menuColumn
@@ -4957,10 +5122,11 @@ Item {
         anchors.leftMargin: menuCard.contentLeftInset
         anchors.rightMargin: menuCard.contentRightInset
         anchors.topMargin: menuCard.contentTopInset
-        height: root.menuItem
-          ? (root.iconMenuSized ? Math.max(0, menuCard.height - menuCard.contentTopInset - menuCard.contentBottomInset) : implicitHeight)
-          : Math.max(0, menuCard.height - menuCard.contentTopInset - menuCard.contentBottomInset)
-        clip: root.menuItem && root.iconMenuSized
+        readonly property bool iconBodyClipped: menuCard.desiredH > menuCard.height + 1 && implicitHeight > Style.space(40)
+        height: !root.menuItem || root.iconMenuSized || iconBodyClipped
+          ? Math.max(0, menuCard.height - menuCard.contentTopInset - menuCard.contentBottomInset)
+          : implicitHeight
+        clip: (root.menuItem && root.iconMenuSized) || iconBodyClipped
         spacing: 2
 
         // Selected icon identity: same glyph and label as the dock tooltip.
@@ -5290,6 +5456,17 @@ Item {
               fontFamily: Style.font.menuFamily
               fontSize: Style.font.bodySmall
               onClicked: root.beginKeybindAdd(root.pendingSection)
+            }
+            Button {
+              Layout.fillWidth: true
+              Layout.preferredWidth: 1
+              text: "System"
+              bordered: true
+              foreground: root.menuForeground
+              accent: Color.accent
+              fontFamily: Style.font.menuFamily
+              fontSize: Style.font.bodySmall
+              onClicked: root.beginSystemAdd(root.pendingSection)
             }
           }
 
@@ -6198,8 +6375,8 @@ Item {
           onPositionChanged: function(mouse) {
             if (!(mouse.buttons & Qt.LeftButton)) return
             var p = mapToItem(menuCard.parent, mouse.x, mouse.y)
-            var maxW = menuCard.parent.width - menuCard.resizePinX - Style.space(8)
-            var maxH = menuCard.parent.height - menuCard.resizePinY - Style.space(8)
+            var maxW = Math.max(1, menuCard.parent.width - menuCard.resizePinX - Style.space(8))
+            var maxH = Math.max(1, menuCard.parent.height - menuCard.resizePinY - Style.space(8))
             var minW = root.menuItem ? menuCard.minIconW : menuCard.minBarW
             var minH = root.menuItem ? menuCard.minIconH : menuCard.minBarH
             var nextW = Math.min(Math.max(minW, startW + p.x - pressX), maxW)
@@ -6231,29 +6408,32 @@ Item {
       padding: Style.space(14)
       readonly property real sideGap: Style.space(12)
       readonly property real screenMargin: Style.space(8)
-      readonly property bool fitsRight: menuCard.x + menuCard.width + sideGap + width <= parent.width - screenMargin
-      readonly property bool fitsLeft: menuCard.x - sideGap - width >= screenMargin
-      readonly property bool fitsBelow: menuCard.y + menuCard.height + sideGap + height <= parent.height - screenMargin
-      width: Math.min(Style.space(380), Math.max(Style.space(280), confirmTitle.implicitWidth + contentLeftInset + contentRightInset))
-      height: confirmBody.implicitHeight + contentTopInset + contentBottomInset
+      readonly property real desiredW: Math.min(Style.space(380), Math.max(Style.space(280), confirmTitle.implicitWidth + contentLeftInset + contentRightInset))
+      readonly property real desiredH: confirmBody.implicitHeight + contentTopInset + contentBottomInset
+      readonly property bool fitsRight: menuCard.x + menuCard.width + sideGap + desiredW <= parent.width - screenMargin
+      readonly property bool fitsLeft: menuCard.x - sideGap - desiredW >= screenMargin
+      readonly property bool fitsBelow: menuCard.y + menuCard.height + sideGap + desiredH <= parent.height - screenMargin
+      readonly property real desiredX: {
+        if (fitsRight) return menuCard.x + menuCard.width + sideGap
+        if (fitsLeft) return menuCard.x - sideGap - desiredW
+        return menuCard.x
+      }
+      readonly property real desiredY: {
+        if (fitsRight || fitsLeft) return menuCard.y
+        if (fitsBelow) return menuCard.y + menuCard.height + sideGap
+        var above = menuCard.y - sideGap - desiredH
+        if (above >= screenMargin) return above
+        return menuCard.y
+      }
+      readonly property var fitted: root.containPopup(desiredX, desiredY, desiredW, desiredH, parent.width, parent.height, screenMargin)
+      width: fitted.width
+      height: fitted.height
       radius: Style.cornerRadius
       color: root.menuBackground
       borderSpec: root.menuBorderSpec
-      x: {
-        var margin = screenMargin
-        if (fitsRight) return menuCard.x + menuCard.width + sideGap
-        if (fitsLeft) return menuCard.x - sideGap - width
-        return Math.min(Math.max(margin, menuCard.x), Math.max(margin, parent.width - width - margin))
-      }
-      y: {
-        var margin = screenMargin
-        if (fitsRight || fitsLeft)
-          return Math.min(Math.max(margin, menuCard.y), Math.max(margin, parent.height - height - margin))
-        if (fitsBelow) return menuCard.y + menuCard.height + sideGap
-        var above = menuCard.y - sideGap - height
-        if (above >= margin) return above
-        return Math.min(Math.max(margin, menuCard.y), Math.max(margin, parent.height - height - margin))
-      }
+      clip: height + 1 < desiredH
+      x: fitted.x
+      y: fitted.y
 
       MouseArea {
         anchors.fill: parent
@@ -6568,6 +6748,16 @@ Item {
         readonly property real naturalHelpW: cardWidth
         readonly property real helpChrome: contentTopInset + helpTitleRow.height + sectionGap + helpSearchRow.height + sectionGap + Style.space(4) + helpCarets.height + contentBottomInset
         readonly property real naturalHelpH: helpChrome + (barHelp ? barHelpBody : Math.min(helpColumn.implicitHeight, maxBody))
+        readonly property real fitMargin: Style.space(8)
+        readonly property real desiredW: root.helpWindowSized ? Math.max(Style.space(280), root.helpWindowW) : naturalHelpW
+        readonly property real desiredH: root.helpWindowSized ? Math.max(Style.space(220), root.helpWindowH) : naturalHelpH
+        readonly property real desiredX: root.helpPosSet ? root.helpPosX : Math.round((parent.width - desiredW) / 2)
+        readonly property real desiredY: {
+          if (root.helpPosSet) return root.helpPosY
+          var aboveMenu = menuCard.y - desiredH - Style.space(12)
+          return Math.min(Math.round((menuCard.y - desiredH) / 2), aboveMenu)
+        }
+        readonly property var fitted: root.containPopup(desiredX, desiredY, desiredW, desiredH, parent.width, parent.height, fitMargin)
         property real dragPressX: 0
         property real dragPressY: 0
         property real dragOriginX: 0
@@ -6575,29 +6765,14 @@ Item {
         property bool resizing: false
         property real resizePinX: 0
         property real resizePinY: 0
-        width: root.helpWindowSized ? Math.min(Math.max(Style.space(280), root.helpWindowW), Math.max(Style.space(280), parent.width - Style.space(16))) : naturalHelpW
-        height: root.helpWindowSized ? Math.min(Math.max(Style.space(220), root.helpWindowH), Math.max(Style.space(220), parent.height - Style.space(16))) : naturalHelpH
+        width: fitted.width
+        height: fitted.height
         radius: Style.cornerRadius
         color: root.menuBackground
         borderSpec: root.menuBorderSpec
         padding: Style.space(12)
-        x: {
-          var margin = Style.space(8)
-          if (resizing) return resizePinX
-          var fallback = Math.max(margin, Math.round((parent.width - width) / 2))
-          if (!root.helpPosSet) return fallback
-          var maxX = Math.max(margin, parent.width - width - margin)
-          return Math.min(Math.max(margin, root.helpPosX), maxX)
-        }
-        y: {
-          var margin = Style.space(12)
-          if (resizing) return resizePinY
-          var aboveMenu = menuCard.y - height - margin
-          var fallback = Math.max(margin, Math.min(Math.round((menuCard.y - height) / 2), aboveMenu))
-          if (!root.helpPosSet) return fallback
-          var maxY = Math.max(margin, parent.height - height - margin)
-          return Math.min(Math.max(margin, root.helpPosY), maxY)
-        }
+        x: resizing ? resizePinX : fitted.x
+        y: resizing ? resizePinY : fitted.y
         function helpDragPoint(item, lx, ly) {
           return item.mapToItem(parent, lx, ly)
         }
@@ -6615,9 +6790,11 @@ Item {
         function helpDragMove(item, lx, ly) {
           if (!root.helpDragging) return
           var p = helpDragPoint(item, lx, ly)
-          var margin = Style.space(8)
-          root.helpPosX = Math.min(Math.max(margin, dragOriginX + p.x - dragPressX), parent.width - width - margin)
-          root.helpPosY = Math.min(Math.max(margin, dragOriginY + p.y - dragPressY), parent.height - height - margin)
+          var nx = dragOriginX + p.x - dragPressX
+          var ny = dragOriginY + p.y - dragPressY
+          var fit = root.containPopup(nx, ny, width, height, parent.width, parent.height, fitMargin)
+          root.helpPosX = fit.x
+          root.helpPosY = fit.y
         }
         function helpDragEnd() {
           root.helpDragging = false
@@ -6871,9 +7048,7 @@ Item {
           anchors.leftMargin: helpCard.contentLeftInset
           anchors.rightMargin: helpCard.contentRightInset
           anchors.topMargin: helpCard.sectionGap
-          height: root.helpWindowSized
-            ? Math.max(Style.space(80), helpCard.height - helpCard.helpChrome)
-            : (helpCard.barHelp ? helpCard.barHelpBody : Math.min(helpColumn.implicitHeight, helpCard.maxBody))
+          height: Math.max(0, helpCard.height - helpCard.helpChrome)
           contentWidth: width
           contentHeight: helpColumn.implicitHeight
           clip: contentHeight > height + 1
@@ -6988,11 +7163,12 @@ Item {
                   "Check a <b>workspace</b> to show this icon there. Uncheck to remove that copy.",
                   "<b>Drag</b> the icon and drop it to move it along the bar.",
                   "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on and <b>Icons</b> checked, it comes off every workspace.",
-                  "The <b>circled i</b> opens this help. Drag the title or the corner grip to move the help window, and the lower-right grip to resize it. The <b>circled X</b> closes the menu."
+                  "The <b>information icon</b> opens this help. Drag the title or the corner grip to move the help window, and the lower-right grip to resize it. The <b>circled X</b> closes the menu."
                 ] : helpCard.barHelp ? [
                   "Drag the <b>title</b>, or the grip in the upper-left corner, to move this window. Drag the grip in the <b>lower-right corner</b> to resize it. The window remembers where you left it and how large you made it.",
                   "When the window is narrower, the <b>Placement</b> choices and the color swatches wrap onto the next line. The section number circles under <b>Sections</b> shrink, then wrap, so they stay inside the window.",
                   "<b>App</b> adds a program. <b>Plugin</b> adds a shell plugin. <b>Web</b> adds a link. <b>KeyBind</b> adds a shortcut from the Super+K list. <b>Placement</b>, to the left of the round choices, picks which section receives the new icon. Those choices show every section. The first four stay on one line, and further sections continue on the next line.",
+                  "<b>System</b> sits to the right of KeyBind. It opens a list headed <b>System…</b> with <b>Logout</b>, <b>Lock</b>, and <b>Shutdown</b>. Type to narrow the list. Choosing one adds that icon to the Placement section and does not run the action.",
                   "A keybind icon shows up to three letters. Hover shows its name. Left-click runs the shortcut.",
                   "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> and <b>−</b> sit directly to the right of the word Sections. <b>+</b> adds an empty section at the end.",
                   "The numbered circles under Sections are the sections themselves. Click a number to press it in. Click it again to release it. <b>−</b> stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
@@ -7002,7 +7178,7 @@ Item {
                   "<b>Transparency +</b> makes the task bar more see-through. <b>Transparency −</b> makes it more solid. Hold <b>Alt and scroll</b> to do the same.",
                   "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme. The <b>gear</b> then takes that same color, three tones lighter. Hovering the gear lightens it further, and the highlight behind it uses the bar color.",
                   "<b>Icon popups</b> shows a name when you hover an icon. If that icon has a blinking underline, the popup also shows <b>(x)</b> to the right of the name, where x is how many of that item are open on this workspace.",
-                  "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut.",
+                  "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut. A System icon opens a check. The title is Logout, Lock, or Shutdown, and the warnings sit under it. <b>Cancel</b> leaves the computer as it is. <b>Proceed</b> runs that action. Escape does the same as Cancel.",
                   "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section. The moving picture stays on the screen where you started the drag.",
                   "<b>Drag</b> a blank part of the task bar to the left, the right, or the bottom to move it there. The resize cursor is a separator: a drag that starts there widens or narrows the section and leaves the bar on its current edge, with or without Super. When the pointer nears the top, a stop symbol appears. The task bar cannot sit on the top.",
                   "<b>Global Changes</b> is the switch on the right of that label. The <b>Icons</b> and <b>Sections</b> checkboxes sit directly under the words. A checked box shows a check mark. They are dimmed, and do nothing, while the switch is off.",
@@ -7011,9 +7187,10 @@ Item {
                   "With the switch on, the bar's <b>edge, icon size, transparency, color, icon popups, and auto-hide</b> still apply to every workspace, whether or not Icons or Sections is checked. With the switch off, those stay on this workspace.",
                   "The <b>globe</b> after the last section is that same switch. Neon green is on. Neon red is off. It is shared by every workspace and cannot be moved or removed.",
                   "The <b>gear</b> to the right of the globe opens this settings menu, the same as a right-click on a blank part of the bar. It cannot be moved or removed.",
+                  "An empty bar reads <b>Right click to start customization</b>. A note, <b>Select gear icon to customize task bar</b>, also appears. The first time the dock is installed, the note stays for two minutes or until you click its X. After that, if every section is still blank, it stays for 15 seconds or until you click its X. Once closed, it stays closed until the bar is empty again on another workspace or the next login.",
                   "<b>Auto hide task bar</b> hides the bar until the pointer reaches its edge. It stays open while the pointer is on the bar.",
                   "A <b>blinking underline</b> under an icon means that item is open on this workspace.",
-                  "The <b>circled i</b> opens Task Bar Help. Drag its title or corner grip to move it, and the lower-right grip to resize it. That place and size are remembered too. The <b>circled X</b> closes the menu."
+                  "The <b>information icon</b> opens Task Bar Help. Drag its title or corner grip to move it, and the lower-right grip to resize it. That place and size are remembered too. The <b>circled X</b> closes the menu."
                 ] : [
                   "<b>Left-click an icon</b> to open another window on this workspace.",
                   "<b>Left-click a plugin</b> to toggle it. <b>Left-click a web link</b> to open it.",
@@ -7023,11 +7200,11 @@ Item {
                   "<b>Place</b> sets which numbered section this icon sits in.",
                   "Check a <b>workspace</b> to copy this icon there. Uncheck to remove that copy.",
                   "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on and <b>Icons</b> checked, it comes off every workspace.",
-                  "<b>Right-click the empty bar</b> to add an app, plugin, or web link.",
+                  "<b>Right-click the empty bar</b> to add an app, plugin, web link, keybind, or a System action. System offers Logout, Lock, and Shutdown. Choosing one adds the icon and does not run the action.",
                   "From the empty bar, change <b>icon size, transparency, and the bar color</b>.",
                   "<b>Scroll</b> on the bar to resize icons. Hold <b>Alt and scroll</b> to change transparency.",
                   "A <b>mark</b> under an app means it is open.",
-                  "The bar <b>slides away</b> until the pointer reaches the bottom edge.",
+                  "With <b>Auto hide task bar</b> on, the bar slides away until the pointer reaches its edge. A new install leaves that switch off.",
                   "Drag the <b>title</b> or the grip in the upper-left corner to move this menu. Drag the lower-right grip to resize it. The place and size are remembered.",
                   "<b>Drag</b> a blank part of the bar left or right to move it to that side. Drag it inward or down to put it back on the bottom. When the pointer nears the top, a stop symbol appears. The bar cannot sit on the top."
                 ]
@@ -7225,8 +7402,8 @@ Item {
             onPositionChanged: function(mouse) {
               if (!(mouse.buttons & Qt.LeftButton)) return
               var p = mapToItem(helpCard.parent, mouse.x, mouse.y)
-              var maxW = helpCard.parent.width - helpCard.resizePinX - Style.space(8)
-              var maxH = helpCard.parent.height - helpCard.resizePinY - Style.space(8)
+              var maxW = Math.max(1, helpCard.parent.width - helpCard.resizePinX - Style.space(8))
+              var maxH = Math.max(1, helpCard.parent.height - helpCard.resizePinY - Style.space(8))
               root.helpWindowW = Math.min(Math.max(Style.space(280), startW + p.x - pressX), maxW)
               root.helpWindowH = Math.min(Math.max(Style.space(220), startH + p.y - pressY), maxH)
             }
@@ -7429,10 +7606,16 @@ Item {
       root.pickerModel ? root.pickerModel.length : 0,
       keybindList ? 16 : 8
     )
-    readonly property int listHeight: Math.max(
+    readonly property int chromeH: root.menuContentMargin * 2 + root.menuHeaderHeight + root.menuContentSpacing
+    readonly property int naturalListHeight: Math.max(
       keybindList ? Style.space(28) : root.menuRowHeight,
       pickerPanel.visibleRowCount * pickerPanel.rowStride - Style.spacing.xs
     )
+    readonly property int listHeight: {
+      var maxCard = Math.max(1, pickerPanel.height - Style.space(16))
+      var room = Math.max(keybindList ? Style.space(28) : root.menuRowHeight, maxCard - chromeH)
+      return Math.min(naturalListHeight, room)
+    }
 
     Rectangle {
       anchors.fill: parent
@@ -7446,10 +7629,11 @@ Item {
 
     BorderSurface {
       id: pickerCard
-      width: root.pickerKind === "keybind"
-        ? Math.min(Style.space(760), parent.width - Style.space(48))
-        : Math.min(Style.space(300), parent.width - Style.gapsOut * 2)
-      height: root.menuContentMargin * 2 + root.menuHeaderHeight + root.menuContentSpacing + pickerPanel.listHeight
+      width: Math.min(
+        root.pickerKind === "keybind" ? Style.space(760) : Style.space(300),
+        Math.max(1, parent.width - Style.space(16))
+      )
+      height: Math.min(pickerPanel.chromeH + pickerPanel.listHeight, Math.max(1, parent.height - Style.space(16)))
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.verticalCenter: parent.verticalCenter
       radius: Style.cornerRadius
@@ -7490,7 +7674,7 @@ Item {
               textFormat: Text.PlainText
               text: root.pickerQuery.length
                 ? root.pickerQuery
-                : (root.pickerKind === "keybind" ? "Search keybindings…" : "Go…")
+                : (root.pickerKind === "keybind" ? "Search keybindings…" : (root.pickerKind === "system" ? "System…" : "Go…"))
               color: root.menuForeground
               opacity: root.pickerQuery.length ? 1 : 0.58
               font.family: Style.font.menuFamily
@@ -7533,12 +7717,16 @@ Item {
                 ? String(modelData.line || modelData.name || "")
                 : root.pickerKind === "plugin"
                   ? String(modelData.name || modelData.id)
-                  : DockModel.entryName(modelData)
+                  : root.pickerKind === "system"
+                    ? String(modelData.label || modelData.name || "")
+                    : DockModel.entryName(modelData)
               iconName: root.pickerKind === "keybind"
                 ? ""
                 : root.pickerKind === "plugin"
                   ? String(modelData.icon || DockModel.pluginIconFor(modelData.id))
-                  : String(modelData.icon || modelData.id)
+                  : root.pickerKind === "system"
+                    ? String(modelData.icon || "applications-system")
+                    : String(modelData.icon || modelData.id)
               onHovered: root.pickerSelectedIndex = index
               onActivated: root.acceptPickerRow(modelData)
             }
@@ -7607,9 +7795,11 @@ Item {
 
     BorderSurface {
       id: webCard
-      width: Math.min(Style.space(300), parent.width - Style.gapsOut * 2)
-      height: root.menuContentMargin * 2 + root.menuHeaderHeight + root.menuContentSpacing
+      readonly property real desiredH: root.menuContentMargin * 2 + root.menuHeaderHeight + root.menuContentSpacing
         + webNameRow.height + Style.spacing.xs + webUrlRow.height
+      width: Math.min(Style.space(300), Math.max(1, parent.width - Style.space(16)))
+      height: Math.min(desiredH, Math.max(1, parent.height - Style.space(16)))
+      clip: height + 1 < desiredH
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.verticalCenter: parent.verticalCenter
       radius: Style.cornerRadius
@@ -7704,8 +7894,171 @@ Item {
     onWebActiveChanged: if (webActive) webPanel.grabKeys()
   }
 
+  component SystemConfirmPanel: PanelWindow {
+    id: systemPanel
+    readonly property bool confirmActive: root.systemConfirmOpen
+    visible: confirmActive
+    focusable: confirmActive
+    exclusionMode: ExclusionMode.Ignore
+    color: "transparent"
+    surfaceFormat.opaque: false
+    WlrLayershell.namespace: "drace3000-bottom-dock-system-confirm"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: confirmActive ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    anchors { left: true; right: true; top: true; bottom: true }
+
+    function grabKeys() {
+      if (confirmActive && systemPanel.WlrLayershell)
+        systemPanel.WlrLayershell.keyboardFocus = WlrKeyboardFocus.Exclusive
+      systemKeyCatcher.forceActiveFocus()
+    }
+
+    HyprlandFocusGrab {
+      active: systemPanel.confirmActive
+      windows: [systemPanel]
+    }
+
+    Rectangle {
+      anchors.fill: parent
+      color: root.menuScrim
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.cancelSystemAction()
+      }
+    }
+
+    BorderSurface {
+      id: systemCard
+      readonly property real screenMargin: Style.space(8)
+      readonly property real desiredW: Math.min(Style.space(420), Math.max(Style.space(300), parent.width - Style.space(16)))
+      readonly property real desiredH: systemBody.implicitHeight + contentTopInset + contentBottomInset
+      readonly property var fitted: root.containPopup(
+        Math.max(0, (parent.width - desiredW) / 2),
+        Math.max(0, (parent.height - desiredH) / 2),
+        desiredW,
+        desiredH,
+        parent.width,
+        parent.height,
+        screenMargin
+      )
+      width: fitted.width
+      height: fitted.height
+      x: fitted.x
+      y: fitted.y
+      radius: Style.cornerRadius
+      color: root.menuBackground
+      borderSpec: root.menuBorderSpec
+      padding: Style.space(16)
+      clip: height + 1 < desiredH
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: systemPanel.grabKeys()
+      }
+
+      Item {
+        id: systemKeyCatcher
+        anchors.fill: parent
+        anchors.topMargin: systemCard.contentTopInset
+        anchors.rightMargin: systemCard.contentRightInset
+        anchors.bottomMargin: systemCard.contentBottomInset
+        anchors.leftMargin: systemCard.contentLeftInset
+        focus: systemPanel.confirmActive
+        Keys.priority: Keys.BeforeItem
+        Keys.onEscapePressed: root.cancelSystemAction()
+
+        Column {
+          id: systemBody
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.NoWrap
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            text: root.systemConfirmTitle
+            color: root.menuForeground
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.heading
+            font.bold: true
+          }
+
+          Rectangle {
+            width: parent.width
+            height: 1
+            color: root.menuLine
+          }
+
+          Repeater {
+            model: root.systemConfirmWarnings
+            delegate: Text {
+              required property var modelData
+              width: systemBody.width
+              horizontalAlignment: Text.AlignLeft
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              text: String(modelData || "")
+              color: root.menuForeground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              text: "Cancel"
+              bordered: true
+              foreground: root.menuForeground
+              accent: Color.accent
+              fontFamily: Style.font.menuFamily
+              width: (parent.width - parent.spacing) / 2
+              onClicked: root.cancelSystemAction()
+            }
+            Button {
+              text: "Proceed"
+              bordered: true
+              foreground: root.menuForeground
+              accent: Color.accent
+              fontFamily: Style.font.menuFamily
+              width: (parent.width - parent.spacing) / 2
+              onClicked: root.proceedSystemAction()
+            }
+          }
+        }
+      }
+    }
+
+    Timer {
+      interval: 50
+      repeat: true
+      triggeredOnStart: true
+      running: systemPanel.confirmActive
+      property int tries: 0
+      onRunningChanged: if (running) tries = 0
+      onTriggered: {
+        systemPanel.grabKeys()
+        tries += 1
+        if (tries >= 8 || systemKeyCatcher.activeFocus)
+          stop()
+      }
+    }
+
+    onVisibleChanged: if (visible) systemPanel.grabKeys()
+    onConfirmActiveChanged: if (confirmActive) systemPanel.grabKeys()
+  }
+
   PickerPanel {
     id: pickerHost
+    screen: root.menuScreen
+  }
+
+  SystemConfirmPanel {
     screen: root.menuScreen
   }
 

@@ -140,7 +140,7 @@ function defaultLook() {
     bgColorKey: "",
     bgColorHex: "",
     showTips: true,
-    autoHide: true
+    autoHide: false
   }
 }
 
@@ -165,7 +165,7 @@ function cloneLook(look, fallback) {
       ? String(src.bgColorHex || "")
       : String(base.bgColorHex || ""),
     showTips: flagOn(src.showTips !== undefined ? src.showTips : base.showTips, true),
-    autoHide: flagOn(src.autoHide !== undefined ? src.autoHide : base.autoHide, true)
+    autoHide: flagOn(src.autoHide !== undefined ? src.autoHide : base.autoHide, false)
   }
 }
 
@@ -399,6 +399,12 @@ function isEmpty(layout) {
   return totalCount(layout) === 0
 }
 
+// First shell start after install keeps the gear note up long enough to
+// notice behind other windows. Later starts use the short timeout.
+function welcomeTimeoutMs(firstRun) {
+  return firstRun ? 120000 : 15000
+}
+
 function parseShellLayout(rawText, pluginId) {
   return parseDockConfig(rawText, pluginId).layout
 }
@@ -413,11 +419,12 @@ function parseDockConfig(rawText, pluginId) {
     bgColorKey: "",
     bgColorHex: "",
     showTips: true,
-    autoHide: true,
+    autoHide: false,
     barEdge: "bottom",
     globalChanges: false,
     globalIcons: true,
     globalSections: true,
+    welcomeIntroduced: false,
     workspaceLooks: {},
     customMenu: null,
     iconMenu: null,
@@ -451,6 +458,8 @@ function parseDockConfig(rawText, pluginId) {
           cfg.globalIcons = entry.globalIcons === true || entry.globalIcons === 1 || entry.globalIcons === "true"
         if (entry.globalSections !== undefined && entry.globalSections !== null)
           cfg.globalSections = entry.globalSections === true || entry.globalSections === 1 || entry.globalSections === "true"
+        if (entry.welcomeIntroduced !== undefined && entry.welcomeIntroduced !== null)
+          cfg.welcomeIntroduced = entry.welcomeIntroduced === true || entry.welcomeIntroduced === 1 || entry.welcomeIntroduced === "true"
         if (entry.customMenu && typeof entry.customMenu === "object") {
           cfg.customMenu = {
             placed: entry.customMenu.placed === true,
@@ -727,6 +736,102 @@ function filterKeybinds(list, query) {
     if (hay.indexOf(q) >= 0) out.push(row)
   }
   return out
+}
+
+function systemEntries() {
+  return [
+    { id: "logout", name: "Logout", label: "Logout", icon: "system-log-out", exec: "omarchy-system-logout" },
+    { id: "lock", name: "Lock", label: "Lock", icon: "system-lock-screen", exec: "omarchy-system-lock" },
+    { id: "shutdown", name: "Shutdown", label: "Shutdown", icon: "system-shutdown", exec: "omarchy-system-shutdown" }
+  ]
+}
+
+function filterSystem(list, query) {
+  var q = String(query || "").trim().toLowerCase()
+  var rows = list || []
+  if (!q) return rows.slice()
+  var out = []
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    var hay = [row.label, row.name, row.id].join(" ").toLowerCase()
+    if (hay.indexOf(q) >= 0) out.push(row)
+  }
+  return out
+}
+
+function makeSystemItem(row) {
+  var id = String((row && row.id) || "action")
+  var label = String((row && (row.label || row.name)) || id)
+  return {
+    id: "system-" + id,
+    label: label,
+    icon: String((row && row.icon) || "applications-system"),
+    desktopId: "",
+    pluginId: "",
+    url: "",
+    exec: String((row && row.exec) || ""),
+    kind: "system"
+  }
+}
+
+function systemPrompt(id) {
+  var key = String(id || "")
+  if (key.indexOf("system-") === 0) key = key.slice(7)
+  var copy = {
+    screensaver: {
+      title: "Screensaver",
+      warnings: [
+        "The screensaver will cover the screen.",
+        "Move the pointer or press a key to leave it."
+      ]
+    },
+    lock: {
+      title: "Lock",
+      warnings: [
+        "The screen will lock.",
+        "Sign in again to continue. Open windows stay as they are."
+      ]
+    },
+    suspend: {
+      title: "Suspend",
+      warnings: [
+        "The computer will sleep.",
+        "Wake it to continue. Unsaved work can be lost if the battery runs out."
+      ]
+    },
+    hibernate: {
+      title: "Hibernate",
+      warnings: [
+        "The session will be written to disk and the computer will power off.",
+        "Wake it to continue. A failed wake can lose unsaved work."
+      ]
+    },
+    logout: {
+      title: "Logout",
+      warnings: [
+        "You will be logged out of this session.",
+        "Open windows will close. Save your work before you proceed."
+      ]
+    },
+    reboot: {
+      title: "Reboot",
+      warnings: [
+        "The computer will restart.",
+        "Open windows will close. Save your work before you proceed."
+      ]
+    },
+    shutdown: {
+      title: "Shutdown",
+      warnings: [
+        "The computer will shut down.",
+        "Open windows will close. Save your work before you proceed."
+      ]
+    }
+  }
+  return copy[key] || {
+    title: "System",
+    warnings: ["This system action will run.", "Save your work before you proceed."]
+  }
 }
 
 function makeWebItem(label, url) {
@@ -1115,7 +1220,7 @@ function keybindMatchesClass(item, className) {
 function itemMatchKeys(item) {
   if (!item) return []
   var kind = String(item.kind || "")
-  if (kind === "plugin" || kind === "web") return []
+  if (kind === "plugin" || kind === "web" || kind === "system") return []
   if (kind === "keybind") return keybindWindowKeys(item)
   var keys = []
   function add(v) {
