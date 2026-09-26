@@ -1,5 +1,19 @@
 # EZ Bottom Dock
 
+## TOP FEATURES
+
+- Pin apps, plugins, web links, keybinds, and system actions on a single task bar
+- Split the bar up to eight sections with separator drag to set width.
+- Drag a blank part of the bar repositioning to the left, right, or bottom edge.
+- Turn on or off auto-hide
+- Each workspace keeps its own layout, or Global Changes applies the next edit to all.
+- Right-click an icon to rename or mouse drag relocating to another section
+- Drag icons along the bar to reposition them
+- Open windows show a blinking icon underline
+- Set resize icons by mouse scroll wheel
+- Set bar background color via theme swatch and transparency level in settings
+- Open task bar help from the information icon
+
 Easy dock for apps, plugins, web links, and keybinds — with per-workspace layouts. A new install shows three blank sections. Icon popups are on. Auto-hide and Global Changes are off.
 
 Built for [Omarchy](https://omarchy.org) / Quickshell. Plugin id: `drace3000.bottom-dock`.
