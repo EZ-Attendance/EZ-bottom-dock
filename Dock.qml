@@ -6055,6 +6055,7 @@ Item {
           }
 
           Text {
+            id: comboLine
             width: parent.width
             leftPadding: Style.space(8)
             rightPadding: Style.space(8)
@@ -6065,6 +6066,11 @@ Item {
             color: root.menuMuted
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.body
+          }
+
+          Item {
+            width: parent.width
+            height: comboLine.font.pixelSize
           }
         }
 
@@ -6082,7 +6088,7 @@ Item {
             anchors.leftMargin: Style.space(10)
             anchors.verticalCenter: parent.top
             textFormat: Text.PlainText
-            text: " PLACE "
+            text: " PLACEMENT "
             color: root.menuMuted
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
@@ -6106,19 +6112,17 @@ Item {
 
             Item {
               width: parent.width
-              height: Style.space(28)
+              height: Math.max(Style.space(28), itemPlaceFlow.implicitHeight)
 
-              Row {
+              Flow {
+                id: itemPlaceFlow
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.verticalCenter: parent.verticalCenter
+                width: parent.width
                 spacing: Style.space(16)
 
                 Repeater {
-                  model: [
-                    { label: "Left", value: "left" },
-                    { label: "Center", value: "center" },
-                    { label: "Right", value: "right" }
-                  ]
+                  model: root.sectionChoices
                   delegate: Item {
                     required property var modelData
                     readonly property bool selected: root.itemPlaceSection === modelData.value
@@ -7159,7 +7163,7 @@ Item {
                   "The letters to the left of the description are the <b>mark</b> on the bar icon. Double-click those letters to change them. Up to three characters.",
                   "<b>Double-click the description</b> to rename it. That name is what you see when you hover the icon.",
                   "The line under the description is the <b>keystroke combination</b>.",
-                  "<b>Place</b> chooses Left, Center, or Right for this icon.",
+                  "<b>Place</b> lists the numbered sections on this bar. The filled choice is the section this icon is in.",
                   "Check a <b>workspace</b> to show this icon there. Uncheck to remove that copy.",
                   "<b>Drag</b> the icon and drop it to move it along the bar.",
                   "<b>Remove</b> takes this icon off this workspace. With <b>Global Changes</b> on and <b>Icons</b> checked, it comes off every workspace.",

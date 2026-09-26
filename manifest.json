@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "drace3000.bottom-dock",
   "name": "EZ Bottom Dock",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "author": "EZ-Attendance",
   "license": "MIT",
   "description": "Easy bottom dock for apps, plugins, and web links — with per-workspace layouts. Starts as three blank sections, with icon popups on and auto-hide and Global Changes off.",
