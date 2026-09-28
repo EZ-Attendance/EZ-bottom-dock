@@ -57,7 +57,7 @@ Auto-hide starts off, so the dock stays on screen. Turn on **Auto hide task bar*
 
 ### Numbered sections
 
-Each workspace can have up to eight numbered sections, or none. **+** adds an empty section at the end. Click a section number to press it in, then **−** removes it. An empty section is removed at once. A section that still has icons asks before it is deleted.
+Each workspace can have up to eight numbered sections, or none. **+** adds an empty section at the end. Click a section number to press it in, then **−** removes it. An empty section is removed at once. A section that still has icons asks before it is deleted. With a number pressed in, **Move to** lists the same numbers. Click one to place that section there. Its icons and width move with it, and the sections number again from the start. That order stays on this workspace.
 
 Drag a separator to widen or narrow the section in front of it, including the separator beside the globe. A press that starts on a separator resizes that section and does not move the bar. The section moves only while **Super** is held or the mouse button is down, and it stops if the pointer leaves the strip. A section will not shrink smaller than its icons. This resize stays on the workspace you are changing, even when Global Changes is on. Saved section widths and the bar’s screen edge are applied when the shell starts.
 
@@ -76,7 +76,7 @@ Right-click the dock background, or click the **gear**:
 
 ### Per-icon actions
 
-**Right-click an icon** to edit its label, choose its section, choose its workspaces, or remove it. The information icon opens help for that icon. The circled **X** closes the menu.
+**Right-click an icon** to edit its label, choose its section, choose its workspaces, or remove it. **Double-click the icon** at the top of that menu to pick a different picture from the icon library, when that library is installed. The program stays the same. The information icon opens help for that icon. The circled **X** closes the menu.
 
 ### Drag and drop
 

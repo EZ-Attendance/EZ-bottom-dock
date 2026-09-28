@@ -29,6 +29,7 @@ function cloneItem(item) {
     id: String(item.id || ""),
     label: String(item.label || item.id || ""),
     icon: String(item.icon || ""),
+    iconPicked: item.iconPicked === true,
     desktopId: String(item.desktopId || ""),
     pluginId: String(item.pluginId || ""),
     url: String(item.url || ""),
@@ -383,6 +384,19 @@ function removeSection(layout, index) {
   var i = Math.round(Number(index))
   if (i < 0 || i >= next.sections.length) return next
   next.sections.splice(i, 1)
+  return next
+}
+
+// The section ends up at toIndex. Its icons and span move with it, and the
+// others shift so the bar numbers again from the start.
+function moveSection(layout, fromIndex, toIndex) {
+  var next = cloneLayout(layout)
+  var from = Math.round(Number(fromIndex))
+  var to = Math.round(Number(toIndex))
+  var n = next.sections.length
+  if (from < 0 || to < 0 || from >= n || to >= n || from === to) return next
+  var moved = next.sections.splice(from, 1)[0]
+  next.sections.splice(to, 0, moved)
   return next
 }
 
@@ -954,6 +968,20 @@ function parsePluginCatalog(rawText, selfId) {
   return out
 }
 
+function filterIcons(catalog, query) {
+  var q = String(query || "").trim().toLowerCase()
+  var list = catalog || []
+  if (!q) return list.slice()
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var row = list[i]
+    if (!row) continue
+    var hay = [row.label, row.name, row.category].join(" ").toLowerCase()
+    if (hay.indexOf(q) >= 0) out.push(row)
+  }
+  return out
+}
+
 function filterPlugins(catalog, query) {
   var q = String(query || "").trim().toLowerCase()
   var list = catalog || []
@@ -1000,6 +1028,23 @@ function setItemBadge(layout, itemId, badge) {
     var arr = next.sections[i].items
     for (var j = 0; j < arr.length; j++) {
       if (arr[j] && arr[j].id === want) arr[j].badge = mark
+    }
+  }
+  return next
+}
+
+function setItemIcon(layout, itemId, icon) {
+  var next = cloneLayout(layout)
+  var want = String(itemId || "")
+  var name = String(icon || "").trim()
+  if (!want.length || !name.length) return next
+  for (var i = 0; i < next.sections.length; i++) {
+    var arr = next.sections[i].items
+    for (var j = 0; j < arr.length; j++) {
+      if (arr[j] && arr[j].id === want) {
+        arr[j].icon = name
+        arr[j].iconPicked = true
+      }
     }
   }
   return next
@@ -1230,7 +1275,9 @@ function itemMatchKeys(item) {
   }
   add(item.desktopId)
   add(item.id)
-  add(item.icon)
+  // A chosen replacement icon can share another app's name. Keep window
+  // matching on the original app so the underline does not follow that icon.
+  if (item.iconPicked !== true) add(item.icon)
   add(item.exec)
   return keys
 }

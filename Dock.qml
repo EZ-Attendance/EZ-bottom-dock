@@ -41,9 +41,12 @@ Item {
   property bool pickerOpen: false
   property bool webOpen: false
   property bool dragging: false
-  property string pickerKind: "app" // "app" | "plugin" | "keybind" | "system"
+  property string pickerKind: "app" // "app" | "plugin" | "keybind" | "system" | "icon"
   property var keybindCatalog: []
   property var systemCatalog: DockModel.systemEntries()
+  property var iconCatalog: []
+  property bool iconLibraryReady: false
+  property bool iconPickWaiting: false
 
   property var layout: DockModel.emptyLayout()
   property var defaultLayout: DockModel.emptyLayout()
@@ -461,10 +464,12 @@ Item {
   readonly property var pickerPlugins: DockModel.filterPlugins(pluginCatalog, pickerQuery)
   readonly property var pickerKeybinds: DockModel.filterKeybinds(keybindCatalog, pickerQuery)
   readonly property var pickerSystem: DockModel.filterSystem(systemCatalog, pickerQuery)
+  readonly property var pickerIcons: DockModel.filterIcons(iconCatalog, pickerQuery)
   readonly property var pickerModel: pickerKind === "plugin"
     ? pickerPlugins
     : pickerKind === "keybind" ? pickerKeybinds
     : pickerKind === "system" ? pickerSystem
+    : pickerKind === "icon" ? pickerIcons
     : pickerApps
   readonly property var hyprWorkspaces: Hyprland.workspaces
   readonly property var listedWorkspaceIds: {
@@ -504,7 +509,9 @@ Item {
       ? "Keybindings"
       : pickerKind === "system"
         ? ("Add system → " + (pendingSection + 1))
-        : ("Add app → " + (pendingSection + 1))
+        : pickerKind === "icon"
+          ? "Choose an icon"
+          : ("Add app → " + (pendingSection + 1))
 
   function open(_payload) {}
   function close() { root.closeMenus() }
@@ -904,6 +911,7 @@ Item {
     pickerQuery = ""
     pickerSelectedIndex = 0
     pickerKind = "app"
+    iconPickWaiting = false
     webName = ""
     webUrl = ""
     webFocus = "name"
@@ -938,6 +946,17 @@ Item {
     var n = DockModel.groupCount(layout)
     if (i < 0 || i >= n) return
     removeSectionPick = removeSectionPick === i ? -1 : i
+  }
+
+  // Reorder stays on this workspace, including when Global Changes and Sections are on.
+  function movePickedSection(toIndex) {
+    var from = removeSectionPick
+    var to = Math.round(Number(toIndex))
+    var n = DockModel.groupCount(layout)
+    if (from < 0 || from >= n || to < 0 || to >= n || from === to) return
+    cancelRemoveSection()
+    persistLayout(DockModel.moveSection(layout, from, to))
+    removeSectionPick = to
   }
 
   // Named apart from the dropSection property, which is the icon-drag target.
@@ -1079,6 +1098,8 @@ Item {
       if (pickerQuery.length) {
         pickerQuery = ""
         pickerSelectedIndex = 0
+      } else if (pickerKind === "icon") {
+        cancelIconPick()
       } else {
         closeMenus()
       }
@@ -2558,8 +2579,55 @@ Item {
     closeMenus()
   }
 
+  function refreshIconCatalog() {
+    if (!iconListProc.running)
+      iconListProc.running = true
+  }
+
+  function openIconPick() {
+    if (!menuOpen || !menuItem || menuItem.kind === "keybind") return
+    if (!iconCatalog || iconCatalog.length === 0) return
+    pickerKind = "icon"
+    pickerQuery = ""
+    pickerSelectedIndex = 0
+    ensureMenuScreen()
+    pickerOpen = true
+    armReveal(menuScreen)
+  }
+
+  function beginIconPick() {
+    if (!menuItem || menuItem.kind === "keybind") return
+    if (!iconLibraryReady) {
+      iconPickWaiting = true
+      refreshIconCatalog()
+      return
+    }
+    if (!iconCatalog || iconCatalog.length === 0) return
+    openIconPick()
+  }
+
+  function cancelIconPick() {
+    pickerOpen = false
+    pickerQuery = ""
+    pickerSelectedIndex = 0
+    pickerKind = "app"
+  }
+
+  function acceptIcon(entry) {
+    if (!entry || !menuItem) return
+    var icon = String(entry.name || "").trim()
+    if (!icon.length) return
+    var itemId = menuItem.id
+    commitLayout(function(current) { return DockModel.setItemIcon(current, itemId, icon) }, "icons")
+    var found = DockModel.findItem(layout, itemId)
+    if (found)
+      menuItem = found
+    cancelIconPick()
+  }
+
   function acceptPickerRow(row) {
-    if (pickerKind === "plugin") acceptPlugin(row)
+    if (pickerKind === "icon") acceptIcon(row)
+    else if (pickerKind === "plugin") acceptPlugin(row)
     else if (pickerKind === "keybind") acceptKeybind(row)
     else if (pickerKind === "system") acceptSystem(row)
     else acceptApp(row)
@@ -2622,6 +2690,29 @@ Item {
           }
         }
         root.pluginCatalog = rows
+      }
+    }
+  }
+
+  Process {
+    id: iconListProc
+    command: ["python3", root.home + "/.config/omarchy/plugins/drace3000.bottom-dock/list-icons.py"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var rows = []
+        try {
+          var parsed = JSON.parse(String(text || "[]"))
+          if (Array.isArray(parsed)) rows = parsed
+        } catch (e) {
+          rows = []
+        }
+        root.iconCatalog = rows
+        root.iconLibraryReady = true
+        if (root.iconPickWaiting) {
+          root.iconPickWaiting = false
+          root.openIconPick()
+        }
       }
     }
   }
@@ -2707,8 +2798,9 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v41")
+    console.log("bottom-dock loaded search-v45")
     root.refreshPluginCatalog()
+    root.refreshIconCatalog()
     root.refreshSystemCatalog()
     root.refreshBackgroundPalette()
     root.requestClientSync()
@@ -5138,7 +5230,7 @@ Item {
 
           MouseArea {
             z: 3
-            anchors.left: parent.left
+            anchors.left: itemMenuHeaderIcon.visible ? itemMenuHeaderIcon.right : parent.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.right: itemMenuInfo.left
@@ -5155,6 +5247,22 @@ Item {
               if (root.menuItem && root.menuItem.kind !== "keybind")
                 root.beginLabelEdit()
             }
+          }
+
+          MouseArea {
+            z: 4
+            anchors.fill: itemMenuHeaderIcon
+            enabled: itemMenuHeader.visible && itemMenuHeaderIcon.visible && !root.labelEdit
+            hoverEnabled: true
+            cursorShape: root.iconLibraryReady && root.iconCatalog.length === 0 ? Qt.ArrowCursor : Qt.PointingHandCursor
+            preventStealing: true
+            onPressed: function(mouse) { menuCard.dragStart(this, mouse.x, mouse.y) }
+            onPositionChanged: function(mouse) {
+              if (!(mouse.buttons & Qt.LeftButton)) return
+              menuCard.dragMove(this, mouse.x, mouse.y)
+            }
+            onReleased: root.persistSettings()
+            onDoubleClicked: root.beginIconPick()
           }
 
           Image {
@@ -5897,6 +6005,48 @@ Item {
                   height: width
                   radius: width / 2
                   onClicked: root.toggleSectionPick(modelData.value)
+                }
+              }
+            }
+
+            Column {
+              visible: root.removeSectionPick >= 0 && root.removeSectionPick < sectionPicker.sectionCount && sectionPicker.sectionCount > 1
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                textFormat: Text.PlainText
+                text: "Move to"
+                color: root.menuForeground
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+
+              Flow {
+                width: parent.width
+                spacing: sectionPicker.circleGap
+
+                Repeater {
+                  model: root.sectionChoices
+                  delegate: Button {
+                    required property var modelData
+                    readonly property bool here: root.removeSectionPick === modelData.value
+                    text: modelData.label
+                    bordered: true
+                    enabled: !here
+                    opacity: enabled ? 1 : 0.35
+                    foreground: root.menuForeground
+                    accent: Color.accent
+                    fontFamily: Style.font.menuFamily
+                    fontSize: Math.max(9, Math.round(sectionPicker.circle * 0.42))
+                    horizontalPadding: 0
+                    verticalPadding: 0
+                    width: sectionPicker.circle
+                    height: width
+                    radius: width / 2
+                    onClicked: root.movePickedSection(modelData.value)
+                  }
                 }
               }
             }
@@ -7170,12 +7320,13 @@ Item {
                   "The <b>information icon</b> opens this help. Drag the title or the corner grip to move the help window, and the lower-right grip to resize it. The <b>circled X</b> closes the menu."
                 ] : helpCard.barHelp ? [
                   "Drag the <b>title</b>, or the grip in the upper-left corner, to move this window. Drag the grip in the <b>lower-right corner</b> to resize it. The window remembers where you left it and how large you made it.",
-                  "When the window is narrower, the <b>Placement</b> choices and the color swatches wrap onto the next line. The section number circles under <b>Sections</b> shrink, then wrap, so they stay inside the window.",
+                  "When the window is narrower, the <b>Placement</b> choices and the color swatches wrap onto the next line. The section number circles under <b>Sections</b>, and the <b>Move to</b> circles, shrink, then wrap, so they stay inside the window.",
                   "<b>App</b> adds a program. <b>Plugin</b> adds a shell plugin. <b>Web</b> adds a link. <b>KeyBind</b> adds a shortcut from the Super+K list. <b>Placement</b>, to the left of the round choices, picks which section receives the new icon. Those choices show every section. The first four stay on one line, and further sections continue on the next line.",
                   "<b>System</b> sits to the right of KeyBind. It opens a list headed <b>System…</b> with <b>Logout</b>, <b>Lock</b>, and <b>Shutdown</b>. Type to narrow the list. Choosing one adds that icon to the Placement section and does not run the action.",
                   "A keybind icon shows up to three letters. Hover shows its name. Left-click runs the shortcut.",
                   "A workspace can have up to eight <b>sections</b>, numbered from the left. <b>+</b> and <b>−</b> sit directly to the right of the word Sections. <b>+</b> adds an empty section at the end.",
                   "The numbered circles under Sections are the sections themselves. Click a number to press it in. Click it again to release it. <b>−</b> stays faded until a number is pressed in. Press <b>−</b> to remove that section.",
+                  "With a number pressed in, <b>Move to</b> appears under those circles and lists the same numbers. The number where that section already sits is faded. Click another number to put the section there. Its icons and its width move with it. The circles then number again from the start of the bar. Move section 4 onto 1 and it becomes section 1, the section that was 1 becomes 2, and the rest follow. That order stays on this workspace.",
                   "An <b>empty section</b> is removed at once. A section that still has icons opens a popup beside this window. <b>Cancel</b> keeps it. <b>Remove All</b> deletes the section and those icons.",
                   "Drag a <b>separator</b> along the bar to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. On the bottom bar that direction is left and right. On a side bar it is up and down. The resize cursor shows while the pointer is over the line. Dragging off the task bar stops the resize, the pointer returns to a normal arrow, and the bar stays on its current edge. Moving back onto the bar while the button is still held does not resume that drag or bring the resize cursor back. Release the button before starting again. A section will not shrink smaller than its icons.",
                   "<b>Icon Size +</b> makes icons larger. <b>Icon Size −</b> makes them smaller. <b>Scroll</b> on the task bar does the same. Section widths scale with the icon size.",
@@ -7187,7 +7338,7 @@ Item {
                   "<b>Drag</b> a blank part of the task bar to the left, the right, or the bottom to move it there. The resize cursor is a separator: a drag that starts there widens or narrows the section and leaves the bar on its current edge, with or without Super. When the pointer nears the top, a stop symbol appears. The task bar cannot sit on the top.",
                   "<b>Global Changes</b> is the switch on the right of that label. The <b>Icons</b> and <b>Sections</b> checkboxes sit directly under the words. A checked box shows a check mark. They are dimmed, and do nothing, while the switch is off.",
                   "With the switch on and <b>Icons</b> checked, adding, moving, renaming, or removing an icon applies to every workspace. Adding or moving an icon into a section number that another workspace does not have yet adds empty sections there until that number exists. If Icons is not checked, those edits stay on the workspace you are changing.",
-                  "With the switch on and <b>Sections</b> checked, adding a section, removing one, or dragging a separator applies to every workspace. If Sections is not checked, those edits stay on this workspace.",
+                  "With the switch on and <b>Sections</b> checked, adding a section, removing one, or dragging a separator applies to every workspace. <b>Move to</b> stays on this workspace. If Sections is not checked, adding, removing, and separator drags stay on this workspace.",
                   "With the switch on, the bar's <b>edge, icon size, transparency, color, icon popups, and auto-hide</b> still apply to every workspace, whether or not Icons or Sections is checked. With the switch off, those stay on this workspace.",
                   "The <b>globe</b> after the last section is that same switch. Neon green is on. Neon red is off. It is shared by every workspace and cannot be moved or removed.",
                   "The <b>gear</b> to the right of the globe opens this settings menu, the same as a right-click on a blank part of the bar. It cannot be moved or removed.",
@@ -7200,6 +7351,7 @@ Item {
                   "<b>Left-click a plugin</b> to toggle it. <b>Left-click a web link</b> to open it.",
                   "<b>Hover an icon</b> to see its name. Hover a blank part of the bar to see how to customize. Turn those popups off from the bar menu.",
                   "<b>Double-click the name</b> at the top of this menu to rename the icon.",
+                  "<b>Double-click the icon</b> at the top of this menu to choose a different picture from the icon library, when that library is installed. The program stays the same.",
                   "Click an icon, then <b>drag and drop</b> it to reposition it along the bar, including into Left, Center, or Right.",
                   "<b>Place</b> sets which numbered section this icon sits in.",
                   "Check a <b>workspace</b> to copy this icon there. Uncheck to remove that copy.",
@@ -7628,13 +7780,13 @@ Item {
 
     MouseArea {
       anchors.fill: parent
-      onClicked: root.closeMenus()
+      onClicked: root.pickerKind === "icon" ? root.cancelIconPick() : root.closeMenus()
     }
 
     BorderSurface {
       id: pickerCard
       width: Math.min(
-        root.pickerKind === "keybind" ? Style.space(760) : Style.space(300),
+        root.pickerKind === "keybind" ? Style.space(760) : root.pickerKind === "icon" ? Style.space(360) : Style.space(300),
         Math.max(1, parent.width - Style.space(16))
       )
       height: Math.min(pickerPanel.chromeH + pickerPanel.listHeight, Math.max(1, parent.height - Style.space(16)))
@@ -7678,7 +7830,7 @@ Item {
               textFormat: Text.PlainText
               text: root.pickerQuery.length
                 ? root.pickerQuery
-                : (root.pickerKind === "keybind" ? "Search keybindings…" : (root.pickerKind === "system" ? "System…" : "Go…"))
+                : (root.pickerKind === "keybind" ? "Search keybindings…" : (root.pickerKind === "system" ? "System…" : (root.pickerKind === "icon" ? "Search icons…" : "Go…")))
               color: root.menuForeground
               opacity: root.pickerQuery.length ? 1 : 0.58
               font.family: Style.font.menuFamily
@@ -7723,14 +7875,19 @@ Item {
                   ? String(modelData.name || modelData.id)
                   : root.pickerKind === "system"
                     ? String(modelData.label || modelData.name || "")
-                    : DockModel.entryName(modelData)
+                    : root.pickerKind === "icon"
+                      ? String(modelData.label || modelData.name || "")
+                      : DockModel.entryName(modelData)
+              detail: root.pickerKind === "icon" ? String(modelData.category || "") : ""
               iconName: root.pickerKind === "keybind"
                 ? ""
                 : root.pickerKind === "plugin"
                   ? String(modelData.icon || DockModel.pluginIconFor(modelData.id))
                   : root.pickerKind === "system"
                     ? String(modelData.icon || "applications-system")
-                    : String(modelData.icon || modelData.id)
+                    : root.pickerKind === "icon"
+                      ? String(modelData.name || "")
+                      : String(modelData.icon || modelData.id)
               onHovered: root.pickerSelectedIndex = index
               onActivated: root.acceptPickerRow(modelData)
             }
