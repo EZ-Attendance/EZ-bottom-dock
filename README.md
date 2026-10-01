@@ -1,4 +1,4 @@
-# EZ Bottom Dock
+# EZ Docker
 
 ## TOP FEATURES
 
@@ -14,7 +14,7 @@
 - Set bar background color via theme swatch and transparency level in settings
 - Open task bar help from the information icon
 
-Easy dock for apps, plugins, web links, and keybinds — with per-workspace layouts. A new install shows three blank sections. Icon popups are on. Auto-hide and Global Changes are off.
+Park apps, plugins, links, and keybinds on the left, right, or bottom. Keep a layout for every workspace, and let the bar hide until you need it. Install it and pin your first shortcut.
 
 Built for [Omarchy](https://omarchy.org) / Quickshell. Plugin id: `drace3000.bottom-dock`.
 

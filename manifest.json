@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "drace3000.bottom-dock",
-  "name": "EZ Bottom Dock",
-  "version": "0.1.21",
+  "name": "EZ Docker",
+  "version": "0.1.22",
   "author": "EZ-Attendance",
   "license": "MIT",
-  "description": "Easy bottom dock for apps, plugins, and web links — with per-workspace layouts. Starts as three blank sections, with icon popups on and auto-hide and Global Changes off.",
+  "description": "Park apps, plugins, links, and keybinds on the left, right, or bottom. Keep a layout for every workspace, and let the bar hide until you need it. Install it and pin your first shortcut.",
   "kinds": ["panel"],
   "keepLoaded": true,
   "entryPoints": {
