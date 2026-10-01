@@ -344,33 +344,187 @@ Item {
     }
   }
 
-  // lead/trail are the margins that center a content-sized bar on the screen.
-  // A side bar stays below the top bar. A bottom bar centers on the full width.
-  function panelInsets(screen, layout, look) {
-    var metrics = metricsForLook(look || lookFor(workspaceId))
-    var vertical = metrics.barEdge !== "bottom"
-    var along = barContentAlong(layout, vertical, metrics)
-    var sw = screen ? Number(screen.width) || 0 : 0
-    var sh = screen ? Number(screen.height) || 0 : 0
-    var screenAlong = vertical ? sh : sw
-    // Screen size is often still 0 on the first paint after login. Pretending
-    // it is 1px wide anchors the bar to the left edge until something else,
-    // such as dragging a separator, forces this function to run again.
-    if (!(screenAlong > 0)) {
+  // Screen-local rectangle for a revealed bar. lead/trail center it on the
+  // long axis. A side bar keeps a gap for the top bar. The rectangle stays
+  // inside the screen even when that screen is shorter than the gap or the
+  // icons. A zero size is the first paint after login, before the output
+  // reports a width; the anchors are recomputed when the size arrives.
+  function placeBar(screenW, screenH, along, edge, gap, cross) {
+    var vertical = edge === "left" || edge === "right"
+    var sw = Math.max(0, Math.round(Number(screenW) || 0))
+    var sh = Math.max(0, Math.round(Number(screenH) || 0))
+    var length = Math.max(1, Math.round(Number(along) || 0))
+    var thick = Math.max(1, Math.round(Number(cross) || 1))
+    var reserve = Math.max(0, Math.round(Number(gap) || 0))
+    if (sw < 1 || sh < 1) {
+      var unknown = Math.max(thick, length)
       return {
-        lead: vertical ? endGap : 0,
+        lead: vertical ? reserve : 0,
         trail: 0,
-        fitted: Math.max(metrics.barCross, along)
+        fitted: unknown,
+        x: 0,
+        y: 0,
+        w: vertical ? thick : unknown,
+        h: vertical ? unknown : thick,
+        known: false
       }
     }
-    var available = vertical ? Math.max(metrics.barCross, screenAlong - endGap) : screenAlong
-    var fitted = Math.max(metrics.barCross, Math.min(along, available))
-    var slack = Math.max(0, (vertical ? available : screenAlong) - fitted)
+    var screenAlong = vertical ? sh : sw
+    var screenCross = vertical ? sw : sh
+    var reserved = vertical ? Math.min(reserve, Math.max(0, screenAlong - 1)) : 0
+    var room = Math.max(1, screenAlong - reserved)
+    var thickness = Math.min(thick, Math.max(1, screenCross))
+    var floor = Math.min(thick, room)
+    var fitted = Math.min(room, Math.max(floor, length))
+    var slack = room - fitted
     var half = Math.floor(slack / 2)
+    var lead = reserved + half
+    var trail = slack - half
+    var x = 0
+    var y = 0
+    var w = thickness
+    var h = fitted
+    if (edge === "right") {
+      x = sw - thickness
+      y = lead
+    } else if (edge === "left") {
+      x = 0
+      y = lead
+    } else {
+      x = lead
+      y = sh - thickness
+      w = fitted
+      h = thickness
+    }
     return {
-      lead: vertical ? endGap + half : half,
-      trail: slack - half,
-      fitted: fitted
+      lead: lead,
+      trail: trail,
+      fitted: fitted,
+      x: x,
+      y: y,
+      w: w,
+      h: h,
+      known: true
+    }
+  }
+
+  // Margins for the hover strip. Both ends shrink together so a short or
+  // narrow screen still keeps a strip on the bar's edge.
+  function edgeStrip(screenW, screenH, edge, gap, edgeSize) {
+    var strip = Math.max(1, Math.round(Number(edgeSize) || 1))
+    var sw = Math.max(0, Math.round(Number(screenW) || 0))
+    var sh = Math.max(0, Math.round(Number(screenH) || 0))
+    var reserve = Math.max(0, Math.round(Number(gap) || 0))
+    if (edge === "bottom") {
+      if (sw < strip)
+        return { left: 0, right: 0, top: 0, bottom: 0 }
+      var side = Math.min(reserve, Math.floor((sw - strip) / 2))
+      return { left: side, right: side, top: 0, bottom: 0 }
+    }
+    if (sh < strip)
+      return { left: 0, right: 0, top: 0, bottom: 0 }
+    var end = Math.min(reserve, Math.floor((sh - strip) / 2))
+    return { left: 0, right: 0, top: end, bottom: end }
+  }
+
+  function placementProbe() {
+    var sizes = [
+      [1920, 1080], [1366, 768], [1280, 720], [1280, 800], [1600, 900],
+      [1920, 1200], [2560, 1440], [2560, 1080], [3440, 1440], [3840, 2160],
+      [5120, 1440], [1080, 1920], [1440, 2560], [2160, 3840], [800, 600],
+      [1024, 600], [640, 480], [768, 1024], [1920, 400], [400, 1080],
+      [320, 240], [720, 1280]
+    ]
+    var edges = ["bottom", "left", "right"]
+    var alongs = [20, 40, 400, 953, 1900, 4000, 8000]
+    var gaps = [0, 33, 80, 200]
+    var crosses = [28, 40, 72, 120]
+    var failures = []
+    var failureCount = 0
+    var checked = 0
+    function pushFail(sw, sh, edge, along, gap, cross, reason) {
+      failureCount += 1
+      if (failures.length < 8) {
+        failures.push(sw + "x" + sh + " " + edge + " along " + along
+          + " gap " + gap + " cross " + cross + ": " + reason)
+      }
+    }
+    for (var s = 0; s < sizes.length; s++) {
+      var sw = sizes[s][0]
+      var sh = sizes[s][1]
+      for (var e = 0; e < edges.length; e++) {
+        var edge = edges[e]
+        for (var a = 0; a < alongs.length; a++) {
+          for (var g = 0; g < gaps.length; g++) {
+            for (var c = 0; c < crosses.length; c++) {
+              checked += 1
+              var along = alongs[a]
+              var gap = gaps[g]
+              var cross = crosses[c]
+              var box = placeBar(sw, sh, along, edge, gap, cross)
+              if (!box.known) {
+                pushFail(sw, sh, edge, along, gap, cross, "unknown screen")
+                continue
+              }
+              if (box.w < 1 || box.h < 1 || box.x < 0 || box.y < 0
+                  || box.x + box.w > sw || box.y + box.h > sh) {
+                pushFail(sw, sh, edge, along, gap, cross, "outside")
+                continue
+              }
+              var alongScreen = edge === "bottom" ? sw : sh
+              if (box.lead + box.fitted + box.trail !== alongScreen)
+                pushFail(sw, sh, edge, along, gap, cross, "margins")
+              if (edge === "right" && box.x + box.w !== sw)
+                pushFail(sw, sh, edge, along, gap, cross, "right flush")
+              if (edge === "left" && box.x !== 0)
+                pushFail(sw, sh, edge, along, gap, cross, "left flush")
+              if (edge === "bottom" && box.y + box.h !== sh)
+                pushFail(sw, sh, edge, along, gap, cross, "bottom flush")
+              var thick = edge === "bottom" ? box.h : box.w
+              var slide = thick + 1
+              var hx = box.x
+              var hy = box.y
+              if (edge === "bottom") hy += slide
+              else if (edge === "left") hx -= slide
+              else hx += slide
+              var overlaps = Math.max(hx, 0) < Math.min(hx + box.w, sw)
+                && Math.max(hy, 0) < Math.min(hy + box.h, sh)
+              if (overlaps)
+                pushFail(sw, sh, edge, along, gap, cross, "hide still visible")
+              var margins = edgeStrip(sw, sh, edge, gap, 4)
+              var stripW = edge === "bottom" ? sw - margins.left - margins.right : 4
+              var stripH = edge === "bottom" ? 4 : sh - margins.top - margins.bottom
+              if (stripW < 1 || stripH < 1 || margins.left < 0 || margins.top < 0
+                  || margins.left + stripW > sw || margins.top + stripH > sh)
+                pushFail(sw, sh, edge, along, gap, cross, "reveal strip")
+            }
+          }
+        }
+      }
+    }
+    var live = placeBar(1920, 1080, 953, "right", 33, 40)
+    if (live.x !== 1880 || live.y !== 80 || live.w !== 40 || live.h !== 953)
+      pushFail(1920, 1080, "right", 953, 33, 40, "live geometry changed")
+    return JSON.stringify({
+      checked: checked,
+      failureCount: failureCount,
+      failures: failures
+    })
+  }
+
+  // lead/trail are the margins that center a content-sized bar on the screen.
+  // A side bar stays below the top bar. A bottom bar centers on the full width.
+  function panelInsets(screen, layout, look, extraAlong) {
+    var metrics = metricsForLook(look || lookFor(workspaceId))
+    var vertical = metrics.barEdge !== "bottom"
+    var along = barContentAlong(layout, vertical, metrics) + Math.max(0, Number(extraAlong) || 0)
+    var sw = screen ? Number(screen.width) || 0 : 0
+    var sh = screen ? Number(screen.height) || 0 : 0
+    var placed = placeBar(sw, sh, along, metrics.barEdge, endGap, metrics.barCross)
+    return {
+      lead: placed.lead,
+      trail: placed.trail,
+      fitted: placed.fitted
     }
   }
 
@@ -862,8 +1016,16 @@ Item {
   function edgeFromDrag(current, x0, y0, x1, y1, screenW, screenH) {
     var dx = x1 - x0
     var dy = y1 - y0
+    // Fixed pixels match a 1080p screen. Shorter screens scale the travel
+    // and the top-bar refusal down so a side edge is still reachable.
     var minTravel = 56
-    if (y1 < 110)
+    var topBand = 110
+    if (screenW > 0 && screenH > 0 && Math.min(screenW, screenH) < 1000) {
+      var span = Math.min(screenW, screenH)
+      minTravel = Math.max(24, Math.min(56, Math.round(span * 0.05)))
+      topBand = Math.max(36, Math.round(screenH * 0.1))
+    }
+    if (y1 < topBand)
       return "blocked"
     if (Math.abs(dx) < minTravel && Math.abs(dy) < minTravel)
       return current === "left" || current === "right" ? current : "bottom"
@@ -3059,6 +3221,9 @@ Item {
       root.closeMenus()
       return "ok"
     }
+    function placementProbe(): string {
+      return root.placementProbe()
+    }
   }
 
   FileView {
@@ -3251,14 +3416,17 @@ Item {
     surfaceFormat.opaque: false
     WlrLayershell.namespace: "drace3000-bottom-dock-edge"
     WlrLayershell.layer: WlrLayer.Overlay
+    readonly property int outputWidth: edgeWindow.screen ? edgeWindow.screen.width : 0
+    readonly property int outputHeight: edgeWindow.screen ? edgeWindow.screen.height : 0
+    readonly property var stripMargins: root.edgeStrip(outputWidth, outputHeight, screenEdge, root.endGap, root.edgeSize)
     anchors.left: screenEdge === "left" || screenEdge === "bottom"
     anchors.right: screenEdge === "right" || screenEdge === "bottom"
     anchors.top: screenEdge !== "bottom"
     anchors.bottom: true
-    margins.top: screenEdge === "bottom" ? 0 : root.endGap
-    margins.bottom: screenEdge === "bottom" ? 0 : root.endGap
-    margins.left: screenEdge === "bottom" ? root.endGap : 0
-    margins.right: screenEdge === "bottom" ? root.endGap : 0
+    margins.top: stripMargins.top
+    margins.bottom: stripMargins.bottom
+    margins.left: stripMargins.left
+    margins.right: stripMargins.right
     implicitWidth: screenEdge === "bottom" ? 0 : root.edgeSize
     implicitHeight: screenEdge === "bottom" ? root.edgeSize : 0
     HoverHandler {
@@ -3326,13 +3494,7 @@ Item {
       var _layout = screenLayout
       var _look = screenLook
       var _extra = gearExtra
-      var base = root.panelInsets(dockWindow.screen, _layout, _look)
-      if (!(verticalBar && _extra > 0)) return base
-      var available = Math.max(1, outputHeight - root.endGap)
-      var fitted = Math.min(available, base.fitted + _extra)
-      var slack = Math.max(0, available - fitted)
-      var half = Math.floor(slack / 2)
-      return { lead: root.endGap + half, trail: slack - half, fitted: fitted }
+      return root.panelInsets(dockWindow.screen, _layout, _look, verticalBar ? _extra : 0)
     }
     anchors.left: verticalBar ? dockWindow.screenEdge === "left" : true
     anchors.right: verticalBar ? dockWindow.screenEdge === "right" : outputWidth > 0
