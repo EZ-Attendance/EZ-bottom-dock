@@ -3008,7 +3008,7 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v46")
+    console.log("bottom-dock loaded search-v47")
     Qt.callLater(function() { root.logMonitorBoxes() })
     root.refreshPluginCatalog()
     root.refreshIconCatalog()
@@ -4378,9 +4378,7 @@ Item {
         anchors.centerIn: parent
         width: parent.width - Style.space(4)
         height: width
-        property color ink: gearMouse.containsMouse
-          ? root.lighterTones(toggleRoot.barColor, 5)
-          : root.lighterTones(toggleRoot.barColor, 3)
+        property color ink: "#FFFFFF"
         onPaint: {
           var ctx = getContext("2d")
           var w = width
@@ -7549,7 +7547,7 @@ Item {
                   "Drag a <b>separator</b> along the bar to widen or narrow the section in front of it, including the separator beside the globe, which resizes the last section. On the bottom bar that direction is left and right. On a side bar it is up and down. The resize cursor shows while the pointer is over the line. Dragging off the task bar stops the resize, the pointer returns to a normal arrow, and the bar stays on its current edge. Moving back onto the bar while the button is still held does not resume that drag or bring the resize cursor back. Release the button before starting again. A section will not shrink smaller than its icons.",
                   "<b>Icon Size +</b> makes icons larger. <b>Icon Size −</b> makes them smaller. <b>Scroll</b> on the task bar does the same. Section widths scale with the icon size.",
                   "<b>Transparency +</b> makes the task bar more see-through. <b>Transparency −</b> makes it more solid. Hold <b>Alt and scroll</b> to do the same.",
-                  "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme. The <b>gear</b> then takes that same color, three tones lighter. Hovering the gear lightens it further, and the highlight behind it uses the bar color.",
+                  "A <b>background swatch</b> sets the task bar color. Theme follows the current Omarchy theme. The <b>gear</b> stays bright white. Hovering it shows a highlight behind it in the bar color.",
                   "<b>Icon popups</b> shows a name when you hover an icon. If that icon has a blinking underline, the popup also shows <b>(x)</b> to the right of the name, where x is how many of that item are open on this workspace.",
                   "<b>Left-click</b> an icon to open it on this workspace. A plugin toggles. A web link opens. A keybind runs its shortcut. A System icon opens a check. The title is Logout, Lock, or Shutdown, and the warnings sit under it. <b>Cancel</b> leaves the computer as it is. <b>Proceed</b> runs that action. Escape does the same as Cancel.",
                   "Click an icon, then <b>drag and drop</b> it to move it along the task bar, including into another numbered section. The moving picture stays on the screen where you started the drag.",

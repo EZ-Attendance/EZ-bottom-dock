@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "drace3000.bottom-dock",
   "name": "EZ Docker",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "author": "EZ-Attendance",
   "license": "MIT",
   "description": "Park apps, plugins, links, and keybinds on the left, right, or bottom. Keep a layout for every workspace, and let the bar hide until you need it. Install it and pin your first shortcut.",
