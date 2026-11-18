@@ -740,17 +740,61 @@ Item {
       Util.execArgv(["bash", "-lc", "hyprctl eval \"$(cat '" + edgeDragLuaPath + "')\""])
   }
 
+  // Hyprland reports width and height as the physical mode. hyprctl cursorpos
+  // and monitor x/y are in the layout, which is that mode divided by scale.
+  // The center Dell is 3840x2160 at scale 2, so it occupies 1920x1080 starting
+  // at x=1920. Using the physical size makes it cover the right monitor and
+  // puts its bottom edge at y=2160, below the screen, so auto-hide never
+  // treats the pointer as on that dock or the one beside it.
+  function monitorScale(mon) {
+    var scale = Number(mon && mon.scale)
+    if (!(scale > 0)) {
+      var ipc = mon && mon.lastIpcObject
+      scale = Number(ipc && ipc.scale)
+    }
+    return scale > 0 ? scale : 1
+  }
+
+  function monitorLayoutBox(mon) {
+    var scale = monitorScale(mon)
+    var w = Number(mon && mon.width) || 0
+    var h = Number(mon && mon.height) || 0
+    if (scale !== 1) {
+      w = w / scale
+      h = h / scale
+    }
+    return {
+      x: Number(mon && mon.x) || 0,
+      y: Number(mon && mon.y) || 0,
+      w: w,
+      h: h,
+      name: String(mon && mon.name || ""),
+      scale: scale
+    }
+  }
+
+  function logMonitorBoxes() {
+    var mons = hyprMonitors()
+    var parts = []
+    for (var i = 0; i < mons.length; i++) {
+      var mon = mons[i]
+      if (!mon) continue
+      var box = monitorLayoutBox(mon)
+      parts.push(box.name + " ipc " + (Number(mon.width) || 0) + "x" + (Number(mon.height) || 0)
+        + " scale " + box.scale + " layout " + Math.round(box.w) + "x" + Math.round(box.h)
+        + " at " + box.x + "," + box.y)
+    }
+    console.log("bottom-dock monitors " + parts.join(" | "))
+  }
+
   function monitorAtGlobal(gx, gy) {
-    var mons = []
-    try { mons = (Hyprland.monitors && Hyprland.monitors.values) ? Hyprland.monitors.values : [] } catch (e) { mons = [] }
+    var mons = hyprMonitors()
     for (var i = 0; i < mons.length; i++) {
       var m = mons[i]
       if (!m) continue
-      var x = Number(m.x) || 0
-      var y = Number(m.y) || 0
-      var w = Number(m.width) || 0
-      var h = Number(m.height) || 0
-      if (gx >= x && gy >= y && gx < x + w && gy < y + h)
+      var box = monitorLayoutBox(m)
+      if (box.w < 1 || box.h < 1) continue
+      if (gx >= box.x && gy >= box.y && gx < box.x + box.w && gy < box.y + box.h)
         return m
     }
     return null
@@ -832,10 +876,11 @@ Item {
       }
       return "nomon"
     }
-    var originX = Number(mon.x) || 0
-    var originY = Number(mon.y) || 0
-    var w = Number(mon.width) || 0
-    var h = Number(mon.height) || 0
+    var box = monitorLayoutBox(mon)
+    var originX = box.x
+    var originY = box.y
+    var w = box.w
+    var h = box.h
     var screen = screenNamed(mon.name)
     var currentEdge = lookFor(workspaceIdForScreen(screen)).barEdge
     var edge = edgeFromDrag(currentEdge, x0 - originX, y0 - originY, x1 - originX, y1 - originY, w, h)
@@ -1480,11 +1525,12 @@ Item {
     for (var i = 0; i < mons.length; i++) {
       var mon = mons[i]
       if (!mon) continue
-      var mx = Number(mon.x) || 0
-      var my = Number(mon.y) || 0
-      var mw = Number(mon.width) || 0
-      var mh = Number(mon.height) || 0
-      var name = String(mon.name || "")
+      var box = monitorLayoutBox(mon)
+      var mx = box.x
+      var my = box.y
+      var mw = box.w
+      var mh = box.h
+      var name = box.name
       if (!name.length || mw < 1 || mh < 1) continue
       var look = lookFor(monWorkspaceId(mon))
       var metrics = metricsForLook(look)
@@ -1547,19 +1593,21 @@ Item {
   }
 
   function notePointer(x, y) {
-    var wasKeeping = cursorKeepsBar()
     pointerX = x
     pointerY = y
     pointerKnown = true
-    if (!(revealHeld || hovered)) return
-    if (menuOpen || pickerOpen || webOpen) return
-    // Stay on the workspace that was hovered. Crossing onto another output's
-    // edge does not reveal that output; its own edge hover does.
-    if (cursorKeepsBar()) {
-      armReveal()
+    if (uiHeld) return
+    // The edge strip is only a few pixels and its hover can miss when the
+    // pointer crosses onto another output. The cursor position is what
+    // decides which monitor's dock slides out.
+    var edgeName = pointerEdgeScreenName(x, y)
+    if (edgeName.length) {
+      revealScreenName = edgeName
+      hideTimer.stop()
+      revealHeld = true
       return
     }
-    if (wasKeeping && revealHeld && !hovered && !uiHeld)
+    if (revealHeld || hovered)
       hideTimer.restart()
   }
 
@@ -2960,7 +3008,8 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v45")
+    console.log("bottom-dock loaded search-v46")
+    Qt.callLater(function() { root.logMonitorBoxes() })
     root.refreshPluginCatalog()
     root.refreshIconCatalog()
     root.refreshSystemCatalog()
@@ -2984,7 +3033,14 @@ Item {
     id: hideTimer
     interval: 450
     onTriggered: {
-      if (root.hovered || root.uiHeld || root.cursorKeepsBar())
+      if (root.uiHeld || root.cursorKeepsBar())
+        return
+      // A HoverHandler can miss the leave when the pointer crosses monitors.
+      // Once the cursor is known to be off every dock edge, drop that hover
+      // so one screen cannot stay revealed and block the others.
+      if (root.pointerKnown)
+        root.hoverCount = 0
+      else if (root.hovered)
         return
       root.revealHeld = false
     }

@@ -197,6 +197,67 @@ def palette(raw):
         cleaned.append({"key": row["key"], "hex": row["hex"]})
         if len(cleaned) >= MAX_COLORS:
             break
+
+    def mode_hex(points):
+        step = 12
+        bins = {}
+        for p in points:
+            bucket = (int(p[3]) // step, int(p[4]) // step, int(p[5]) // step)
+            bins.setdefault(bucket, []).append(p)
+        if not bins:
+            return ""
+        return hex_of(*avg_rgb(max(bins.values(), key=len)))
+
+    def edge_points(side):
+        band = max(8, SIZE // 5)
+        picked = []
+        for i, p in enumerate(pixels):
+            x, y = i % SIZE, i // SIZE
+            if side == "bottom" and y >= SIZE - band:
+                picked.append(p)
+            elif side == "left" and x < band:
+                picked.append(p)
+            elif side == "right" and x >= SIZE - band:
+                picked.append(p)
+            elif side == "top" and y < band:
+                picked.append(p)
+        return picked
+
+    # Color directly behind the bar. The whole-image mass is often the floor
+    # or the rock, which is not the color the bar sits on.
+    side = sys.argv[1] if len(sys.argv) > 1 else "top"
+    if side not in ("top", "bottom", "left", "right"):
+        side = "top"
+    behind = mode_hex(edge_points(side))
+    whole = mode_hex(pixels)
+    lead = []
+    if behind:
+        lead.append({"key": "behind", "hex": behind})
+    if whole and whole != behind:
+        lead.append({"key": "predominant", "hex": whole})
+    if lead:
+        used_hex = {row["hex"] for row in lead}
+        cleaned = [row for row in cleaned if row["hex"] not in used_hex]
+        cleaned = (lead + cleaned)[:MAX_COLORS]
+    # Theme background inks stay available after the luminance cap. A light
+    # bar needs one of these for readable text, and they sort too dark to
+    # survive MAX_COLORS on a bright wallpaper.
+    present = {row["key"] for row in cleaned}
+    for key, rgb in parse_theme_colors(THEME_COLORS):
+        if key not in (
+            "background",
+            "dark-background",
+            "darker-background",
+            "lighter-background",
+        ):
+            continue
+        if key in present:
+            continue
+        hx = hex_of(*rgb)
+        if any(row["hex"] == hx for row in cleaned):
+            continue
+        cleaned.append({"key": key, "hex": hx})
+        present.add(key)
     return cleaned
 
 
