@@ -6,6 +6,7 @@ listPlugins from a nested Process can hang or return empty).
 """
 import json
 import os
+import re
 from pathlib import Path
 
 HOME = Path.home()
@@ -58,31 +59,61 @@ def load_json(path):
         return None
 
 
+LOADER_KINDS = ("panel", "overlay", "menu")
+
+
 def summonable(kinds):
     kinds = kinds or []
-    if any(k in kinds for k in ("panel", "overlay", "menu")):
+    if any(k in kinds for k in LOADER_KINDS):
         return True
     return "bar-widget" in kinds
 
 
+def layout_ids(shell_cfg):
+    """Every plugin id sitting in the 4.5 bar, including centerBegin, centerEnd, and tray."""
+    ids = set()
+    layout = (shell_cfg.get("bar") or {}).get("layout") or {}
+    if not isinstance(layout, dict):
+        return ids
+    for entries in layout.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id"):
+                ids.add(entry["id"])
+            elif isinstance(entry, str):
+                ids.add(entry)
+    return ids
+
+
 def read_enabled(shell_cfg):
     """Return (third_party_enabled_ids, disabled_ids)."""
-    enabled = set()
+    enabled = set(layout_ids(shell_cfg))
     disabled = set(shell_cfg.get("disabledPlugins") or [])
     for entry in shell_cfg.get("plugins") or []:
         if isinstance(entry, dict) and entry.get("id"):
             enabled.add(entry["id"])
         elif isinstance(entry, str):
             enabled.add(entry)
-    bar = shell_cfg.get("bar") or {}
-    layout = bar.get("layout") or {}
-    for section in ("left", "center", "right"):
-        for entry in layout.get(section) or []:
-            if isinstance(entry, dict) and entry.get("id"):
-                enabled.add(entry["id"])
-            elif isinstance(entry, str):
-                enabled.add(entry)
     return enabled, disabled
+
+
+def widget_popup(manifest_path, data):
+    """True when a bar-only widget exposes the open/close pair shell.toggle calls."""
+    eps = data.get("entryPoints") or {}
+    rel = str(eps.get("barWidget") or "")
+    if not rel:
+        return False
+    qml = manifest_path.parent / rel
+    try:
+        text = qml.read_text(errors="replace")
+    except OSError:
+        return False
+    # qs.Ui Panel supplies open(), close(), and toggle() on the root, so a
+    # widget whose root type is Panel can be summoned without restating them.
+    if re.search(r"(?m)^Panel\s*\{", text):
+        return True
+    return "function open" in text and "function close" in text
 
 
 def scan_manifests(root, first_party, out):
@@ -103,12 +134,15 @@ def scan_manifests(root, first_party, out):
         kinds = data.get("kinds") or []
         if not isinstance(kinds, list) or not summonable(kinds):
             continue
+        loader = any(k in kinds for k in LOADER_KINDS)
         out[pid] = {
             "id": pid,
             "name": str(data.get("name") or data.get("barWidget", {}).get("displayName") or pid),
             "kinds": kinds,
             "icon": ICON_MAP.get(pid, "preferences-system"),
             "firstParty": first_party,
+            "loader": loader,
+            "barToggle": (not loader) and "bar-widget" in kinds and widget_popup(path, data),
         }
 
 
@@ -130,17 +164,30 @@ def main():
                 "kinds": ["bar-widget"],
                 "icon": ICON_MAP.get(forced, "preferences-system"),
                 "firstParty": False,
+                "loader": False,
+                "barToggle": True,
             }
 
+    on_bar = layout_ids(shell_cfg)
     rows = []
     for pid, row in found.items():
         if pid in disabled_ids or pid in EXCLUDED:
             continue
-        if row["firstParty"]:
-            rows.append(row)
+        # A panel, overlay, or menu is summoned by the shell loader.
+        # A bar-only widget is summoned through the live bar slot, so a pin
+        # for one that is not on the bar does nothing in Omarchy 4.5.
+        if row.get("loader"):
+            offered = row["firstParty"] or pid in enabled_ids
+        else:
+            offered = row.get("barToggle") and pid in on_bar
+        if not offered:
             continue
-        if pid in enabled_ids:
-            rows.append(row)
+        rows.append({
+            "id": row["id"],
+            "name": row["name"],
+            "kinds": row["kinds"],
+            "icon": row["icon"],
+        })
 
     rows.sort(key=lambda x: x["name"].lower())
     print(json.dumps(rows))

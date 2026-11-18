@@ -2582,7 +2582,7 @@ Item {
     systemConfirmMode = "run"
     systemConfirmTitle = String(notice.title || "System")
     systemConfirmWarnings = notice.warnings || []
-    systemConfirmExec = String(item.exec || "")
+    systemConfirmExec = DockModel.systemCommandFor(item.id) || String(item.exec || "")
     systemConfirmItem = item
     systemConfirmSection = pendingSection
     systemConfirmOpen = true
@@ -2622,6 +2622,30 @@ Item {
     releaseRevealSoon()
   }
 
+  function launchDesktopEntry(id) {
+    var desktopId = String(id || "")
+    if (desktopId.slice(-8) === ".desktop") desktopId = desktopId.slice(0, -8)
+    if (!desktopId.length) return
+    var entry = null
+    try { entry = DesktopEntries.byId(desktopId) } catch (e) { entry = null }
+    if (!entry) entry = desktopEntryForItem({ id: desktopId, desktopId: desktopId })
+    if (entry && entry.runInTerminal === true) {
+      var words = entry.command || []
+      var kept = []
+      for (var w = 0; w < words.length; w++) {
+        var word = String(words[w] || "")
+        if (/^%[a-zA-Z]$/.test(word)) continue
+        if (!word.length) continue
+        kept.push(Util.shellQuote(word))
+      }
+      if (kept.length) {
+        Util.execDetached("omarchy-launch-tui " + kept.join(" "))
+        return
+      }
+    }
+    Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(desktopId + ".desktop"))
+  }
+
   function launchItem(item) {
     if (!item) return
     if (item.kind === "keybind") {
@@ -2637,19 +2661,25 @@ Item {
       return
     }
     if (item.kind === "web" && item.url) {
-      Util.execArgv(["xdg-open", String(item.url)])
+      // Omarchy 4.5 opens a link in the default browser through this launcher.
+      // xdg-open skips its handoff and window focus.
+      var href = String(item.url)
+      if (/^https?:\/\//i.test(href))
+        Util.execArgv(["omarchy-launch-browser", href])
+      else
+        Util.execArgv(["xdg-open", href])
       return
     }
     if (item.kind === "system") {
       askSystemConfirm(item, menuScreen)
       return
     }
-    // Same launch as Super+Space. Every click starts another instance on
-    // the current workspace instead of raising a window elsewhere.
+    // Same launch as the 4.5 app menu. A terminal entry goes through
+    // omarchy-launch-tui so the window is named after the program.
+    // Every click starts another instance on the current workspace.
     var id = String(item.desktopId || item.id || "")
     if (id && item.kind !== "plugin") {
-      if (id.slice(-8) === ".desktop") id = id.slice(0, -8)
-      Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(id + ".desktop"))
+      launchDesktopEntry(id)
       return
     }
     if (item.exec) {
@@ -3008,7 +3038,7 @@ Item {
   }
 
   Component.onCompleted: {
-    console.log("bottom-dock loaded search-v47")
+    console.log("bottom-dock loaded search-v50")
     Qt.callLater(function() { root.logMonitorBoxes() })
     root.refreshPluginCatalog()
     root.refreshIconCatalog()

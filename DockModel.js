@@ -21,10 +21,26 @@ function sectionIndex(section) {
   return n
 }
 
+// `omarchy system <action>` is the command both Omarchy 4 and 4.5 accept.
+// 4.0 runs omarchy-system-logout. 4.5 runs `omarchy-system logout`.
+// The omarchy dispatcher picks whichever binary is installed.
+// Pins saved with either old name are resolved by id.
+function systemCommandFor(id) {
+  var key = String(id || "")
+  if (key.indexOf("system-") === 0) key = key.slice(7)
+  if (key === "logout") return "omarchy system logout"
+  if (key === "lock") return "omarchy system lock"
+  if (key === "shutdown") return "omarchy system shutdown"
+  if (key === "reboot") return "omarchy system reboot"
+  return ""
+}
+
 function cloneItem(item) {
   if (!item || typeof item !== "object") return null
   var kind = String(item.kind || (item.pluginId ? "plugin" : (item.url ? "web" : (item.bindDispatcher ? "keybind" : "app"))))
   if (kind === "separator") return null
+  var exec = String(item.exec || "")
+  if (kind === "system") exec = systemCommandFor(item.id) || exec
   return {
     id: String(item.id || ""),
     label: String(item.label || item.id || ""),
@@ -33,7 +49,7 @@ function cloneItem(item) {
     desktopId: String(item.desktopId || ""),
     pluginId: String(item.pluginId || ""),
     url: String(item.url || ""),
-    exec: String(item.exec || ""),
+    exec: exec,
     badge: String(item.badge || ""),
     bindCombo: String(item.bindCombo || ""),
     bindDispatcher: String(item.bindDispatcher || ""),
@@ -754,9 +770,9 @@ function filterKeybinds(list, query) {
 
 function systemEntries() {
   return [
-    { id: "logout", name: "Logout", label: "Logout", icon: "system-log-out", exec: "omarchy-system-logout" },
-    { id: "lock", name: "Lock", label: "Lock", icon: "system-lock-screen", exec: "omarchy-system-lock" },
-    { id: "shutdown", name: "Shutdown", label: "Shutdown", icon: "system-shutdown", exec: "omarchy-system-shutdown" }
+    { id: "logout", name: "Logout", label: "Logout", icon: "system-log-out", exec: systemCommandFor("logout") },
+    { id: "lock", name: "Lock", label: "Lock", icon: "system-lock-screen", exec: systemCommandFor("lock") },
+    { id: "shutdown", name: "Shutdown", label: "Shutdown", icon: "system-shutdown", exec: systemCommandFor("shutdown") }
   ]
 }
 
